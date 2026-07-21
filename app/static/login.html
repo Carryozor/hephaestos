@@ -11,8 +11,8 @@
     color-scheme: dark;
     --font-sans: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
     --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
-    --bg: #0d1013; --surface: #14181c; --border: #262c32;
-    --text: #d7dde2; --muted: #7d8891; --accent: #3fb8a6; --bad: #d9615a;
+    --bg: #0d1013; --surface: #151a20; --border: #27313b;
+    --text: #d9e2ea; --muted: #7c8996; --accent: #ff7a29; --bad: #e2605a;
   }
   * { box-sizing: border-box; }
   body {
@@ -23,7 +23,7 @@
   .panel-top { height: 3px; background: var(--accent); }
   .panel-body { padding: 1.9rem 1.6rem 1.6rem; }
   .brand { display: flex; align-items: center; gap: .5rem; margin-bottom: .3rem; }
-  .brand-mark { width: 22px; height: 22px; border-radius: 4px; flex: none; }
+  .brand-mark { width: auto; height: 40px; flex: none; }
   .brand-name { font-size: .85rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #f0f3f5; }
   .eyebrow { font-size: .68rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-bottom: 1.5rem; }
   .intro { font-size: .82rem; line-height: 1.5; color: var(--muted); margin-bottom: 1.3rem; }
@@ -34,14 +34,14 @@
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
     transition: border-color 150ms ease, box-shadow 150ms ease;
   }
-  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(63,184,166,.2); }
+  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(255,122,41,.2); }
   .hint { font-size: .68rem; color: var(--muted); margin-top: .35rem; }
   button {
     width: 100%; margin-top: 1.5rem; padding: .7rem; border: 1px solid var(--accent); border-radius: 3px;
     font-family: inherit; font-size: .78rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
     color: var(--accent); background: transparent; cursor: pointer; transition: all 150ms ease;
   }
-  button:hover { background: rgba(63,184,166,.12); }
+  button:hover { background: rgba(255,122,41,.12); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .msg {
     display: none; margin-top: 1.1rem; padding: .55rem .7rem; border-radius: 3px; font-size: .8rem;
@@ -55,7 +55,7 @@
 <div class="panel">
   <div class="panel-top"></div>
   <div class="panel-body">
-    <div class="brand"><img class="brand-mark" src="/static/assets/favicon-180.png" alt=""><span class="brand-name">Hephaestos</span></div>
+    <div class="brand"><img class="brand-mark" src="/static/assets/logo-mark.png" alt=""><span class="brand-name">Hephaestos</span></div>
 
     <!-- Formulaire de connexion (cas normal) -->
     <form id="loginForm" novalidate hidden>
