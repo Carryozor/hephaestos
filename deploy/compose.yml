@@ -1,0 +1,21 @@
+name: hephaestos
+services:
+  hephaestos:
+    image: hephaestos:v1
+    container_name: hephaestos
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    env_file: .env
+    volumes: ["./data:/data"]
+    ports: ["127.0.0.1:8710:8710"]   # Tailscale only — JAMAIS 0.0.0.0
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+    networks: [hephaestos]
+networks:
+  hephaestos:
+    driver: bridge
+    ipam:
+      config: [{subnet: "10.87.0.0/16"}]

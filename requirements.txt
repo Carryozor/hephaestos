@@ -1,0 +1,6 @@
+# dependances RUNTIME uniquement (image Docker prod) -- les outils de test vivent
+# dans requirements-dev.txt : ne pas embarquer pytest/coverage en prod
+bcrypt==5.0.0
+fastapi==0.139.0
+httpx==0.28.1
+uvicorn[standard]==0.51.0

@@ -1,0 +1,28 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["."]
+
+[tool.ruff.lint]
+# E/F = pycodestyle+pyflakes, I = tri des imports, B = bugbear (pièges réels),
+# UP = modernisation, SIM = simplifications. Pas de règles cosmétiques au-delà.
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = [
+    "E501",   # longueur de ligne : gérée par le formateur humain, pas bloquante
+    "SIM105", # contextlib.suppress : les try/except explicites sont voulus ici
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["SIM117"]  # with imbriqués lisibles dans les tests
+
+[tool.mypy]
+python_version = "3.12"
+files = ["app"]
+# Barre pragmatique : attraper les vraies erreurs de type sans exiger
+# une annotation totale (le code est déjà typé partout où ça compte).
+check_untyped_defs = true
+# warn_return_any volontairement absent : tout l'état vient de json.loads (Any),
+# la règle ne produirait que du bruit de cast sans attraper de vrai bug ici.
+warn_unused_ignores = true
+no_implicit_optional = true
+ignore_missing_imports = true

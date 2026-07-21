@@ -1,0 +1,17 @@
+{
+  "api_base": "http://127.0.0.1:8710",
+  "agent_token": "REMPLACER",
+  "kuma_agent_push": "https://uptime-kuma.example.com/api/push/REMPLACER",
+  "auto_update_window": {"start": "05:00", "end": "05:30"},
+  "steamcmd": "C:\\steam\\steamcmd.exe",
+  "steamcmd_root": "C:\\steam",
+  "backend_config_hash": "",
+  "servers": [
+    {"name": "palworld", "appid": 2394010, "process": "PalServer-Win64-Shipping-Cmd",
+     "start_task": "PalServer", "stop_adapter": "palworld-rcon",
+     "rcon": {"host": "127.0.0.1", "port": 25575},
+     "kuma_maj_push": "https://uptime-kuma.example.com/api/push/REPLACE_WITH_YOUR_TOKEN"},
+    {"name": "windrose", "appid": 4129620, "process": "WindroseServer",
+     "start_task": "WindroseServer", "stop_adapter": "generic-graceful", "kuma_maj_push": "https://uptime-kuma.example.com/api/push/REMPLACER"}
+  ]
+}

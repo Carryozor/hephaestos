@@ -1,0 +1,14 @@
+.venv/
+.venv-tools/
+__pycache__/
+*.pyc
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+node_modules/
+
+# Secrets & données locales — ne jamais committer
+deploy/.env
+deploy/data/
+data/

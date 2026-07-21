@@ -1,0 +1,29 @@
+{
+  "2394010": {
+    "name": "palworld",
+    "process": "PalServer-Win64-Shipping-Cmd",
+    "stop_adapter": "palworld-rcon",
+    "exe_relative_path": "PalServer.exe",
+    "launch_args": "-useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS",
+    "workshop_appid": 1623730
+  },
+  "4129620": {
+    "name": "windrose",
+    "process": "WindroseServer-Win64-Shipping",
+    "stop_adapter": "generic-force",
+    "exe_relative_path": "WindroseServer.exe",
+    "launch_args": "",
+    "windrose_plus": true
+  },
+  "896660": {
+    "name": "valheim",
+    "process": "valheim_server",
+    "stop_adapter": "generic-graceful",
+    "exe_relative_path": "valheim_server.exe",
+    "launch_args": "-nogui -name {name} -world {world} -port 2456 -password {password}",
+    "default_params": {
+      "name": "Hephaestos-Valheim",
+      "world": "Dedicated"
+    }
+  }
+}

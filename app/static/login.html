@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon-180.png">
+<title>Hephaestos — Connexion</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --font-sans: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    --bg: #0d1013; --surface: #14181c; --border: #262c32;
+    --text: #d7dde2; --muted: #7d8891; --accent: #3fb8a6; --bad: #d9615a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-sans); color: var(--text); background: var(--bg);
+  }
+  .panel { width: 320px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; }
+  .panel-top { height: 3px; background: var(--accent); }
+  .panel-body { padding: 1.9rem 1.6rem 1.6rem; }
+  .brand { display: flex; align-items: center; gap: .5rem; margin-bottom: .3rem; }
+  .brand-mark { width: 22px; height: 22px; border-radius: 4px; flex: none; }
+  .brand-name { font-size: .85rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #f0f3f5; }
+  .eyebrow { font-size: .68rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-bottom: 1.5rem; }
+  .intro { font-size: .82rem; line-height: 1.5; color: var(--muted); margin-bottom: 1.3rem; }
+  label { display: block; font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: .35rem; margin-top: 1rem; }
+  label:first-of-type { margin-top: 0; }
+  input {
+    width: 100%; padding: .6rem .7rem; border-radius: 3px; font-size: .9rem; font-family: var(--font-mono);
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    transition: border-color 150ms ease, box-shadow 150ms ease;
+  }
+  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(63,184,166,.2); }
+  .hint { font-size: .68rem; color: var(--muted); margin-top: .35rem; }
+  button {
+    width: 100%; margin-top: 1.5rem; padding: .7rem; border: 1px solid var(--accent); border-radius: 3px;
+    font-family: inherit; font-size: .78rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--accent); background: transparent; cursor: pointer; transition: all 150ms ease;
+  }
+  button:hover { background: rgba(63,184,166,.12); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .msg {
+    display: none; margin-top: 1.1rem; padding: .55rem .7rem; border-radius: 3px; font-size: .8rem;
+    background: rgba(217,97,90,.12); border: 1px solid rgba(217,97,90,.4); color: #ff9d95;
+  }
+  [hidden] { display: none !important; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="panel">
+  <div class="panel-top"></div>
+  <div class="panel-body">
+    <div class="brand"><img class="brand-mark" src="/static/assets/favicon-180.png" alt=""><span class="brand-name">Hephaestos</span></div>
+
+    <!-- Formulaire de connexion (cas normal) -->
+    <form id="loginForm" novalidate hidden>
+      <div class="eyebrow">Connexion requise</div>
+      <label for="loginUsername">Nom d'utilisateur</label>
+      <input type="text" id="loginUsername" name="username" autocomplete="username" required>
+      <label for="loginPassword">Mot de passe</label>
+      <input type="password" id="loginPassword" name="password" autocomplete="current-password" required>
+      <button type="submit">Connexion</button>
+      <div id="loginError" class="msg" role="alert"></div>
+    </form>
+
+    <!-- Première configuration (aucun compte n'existe encore) -->
+    <form id="setupForm" novalidate hidden>
+      <div class="eyebrow">Première configuration</div>
+      <p class="intro">Aucun compte n'existe encore. Créez le compte administrateur : il aura le contrôle complet et pourra ensuite ajouter d'autres comptes.</p>
+      <label for="setupUsername">Nom d'administrateur</label>
+      <input type="text" id="setupUsername" name="username" autocomplete="username" required>
+      <div class="hint">2 à 32 caractères : lettres, chiffres, tiret, souligné.</div>
+      <label for="setupPassword">Mot de passe</label>
+      <input type="password" id="setupPassword" name="password" autocomplete="new-password" required>
+      <div class="hint">12 caractères minimum.</div>
+      <label for="setupConfirm">Confirmer le mot de passe</label>
+      <input type="password" id="setupConfirm" name="confirm" autocomplete="new-password" required>
+      <button type="submit">Créer l'administrateur</button>
+      <div id="setupError" class="msg" role="alert"></div>
+    </form>
+  </div>
+</div>
+<script>
+const PASSWORD_MIN = 12;
+const USERNAME_RE = /^[A-Za-z0-9_-]{2,32}$/;
+
+const loginForm = document.getElementById("loginForm");
+const setupForm = document.getElementById("setupForm");
+
+function showError(box, text) { box.textContent = text; box.style.display = "block"; }
+
+// Décide au chargement quel formulaire présenter selon l'état first-run.
+async function init() {
+  let needed = false;
+  try {
+    const res = await fetch("/api/setup/needed");
+    if (res.ok) needed = (await res.json()).needed === true;
+  } catch (_) { /* réseau indisponible : on retombe sur le login */ }
+  const target = needed ? setupForm : loginForm;
+  target.hidden = false;
+  target.querySelector("input").focus();
+}
+
+loginForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const box = document.getElementById("loginError");
+  box.style.display = "none";
+  const username = document.getElementById("loginUsername").value;
+  const password = document.getElementById("loginPassword").value;
+  const res = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (res.ok) { window.location.href = "/"; }
+  else { showError(box, "Identifiants invalides."); }
+});
+
+setupForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const box = document.getElementById("setupError");
+  box.style.display = "none";
+  const username = document.getElementById("setupUsername").value;
+  const password = document.getElementById("setupPassword").value;
+  const confirm = document.getElementById("setupConfirm").value;
+  if (!USERNAME_RE.test(username)) { showError(box, "Nom invalide (2 à 32 caractères : lettres, chiffres, - et _)."); return; }
+  if (password.length < PASSWORD_MIN) { showError(box, "Le mot de passe doit faire au moins 12 caractères."); return; }
+  if (password !== confirm) { showError(box, "Les deux mots de passe ne correspondent pas."); return; }
+  const res = await fetch("/api/setup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (res.ok) {
+    window.location.href = "/";  // session posée par le serveur : on entre directement
+  } else if (res.status === 409) {
+    showError(box, "Un compte existe déjà. Rechargez la page pour vous connecter.");
+  } else {
+    showError(box, "Création impossible. Vérifiez le nom et le mot de passe.");
+  }
+});
+
+init();
+</script>
+</body>
+</html>
