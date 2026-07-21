@@ -12,7 +12,7 @@
     --font-sans: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
     --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
     --bg: #0d1013; --surface: #151a20; --border: #27313b;
-    --text: #d9e2ea; --muted: #7c8996; --accent: #ff7a29; --bad: #e2605a;
+    --text: #d9e2ea; --muted: #7c8996; --accent: #ef5622; --bad: #e2605a;
   }
   * { box-sizing: border-box; }
   body {
@@ -34,14 +34,14 @@
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
     transition: border-color 150ms ease, box-shadow 150ms ease;
   }
-  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(255,122,41,.2); }
+  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(239,86,34,.2); }
   .hint { font-size: .68rem; color: var(--muted); margin-top: .35rem; }
   button {
     width: 100%; margin-top: 1.5rem; padding: .7rem; border: 1px solid var(--accent); border-radius: 3px;
     font-family: inherit; font-size: .78rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
     color: var(--accent); background: transparent; cursor: pointer; transition: all 150ms ease;
   }
-  button:hover { background: rgba(255,122,41,.12); }
+  button:hover { background: rgba(239,86,34,.12); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .msg {
     display: none; margin-top: 1.1rem; padding: .55rem .7rem; border-radius: 3px; font-size: .8rem;
