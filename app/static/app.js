@@ -1759,7 +1759,19 @@ async function saveAccountAccess(username) {
   await refreshAccounts();
 }
 
+async function fetchVersion() {
+  const el = document.getElementById("appVersion");
+  if (!el) return;
+  try {
+    const res = await fetch("/api/version");
+    if (!res.ok) return;
+    const { version } = await res.json();
+    if (version) el.textContent = `v${version}`;
+  } catch { /* affichage cosmetique : silencieux si indisponible */ }
+}
+
 searchBox.addEventListener("input", renderGrid);
 fetchServers();
 fetchMe();
+fetchVersion();
 setInterval(fetchServers, 10000);

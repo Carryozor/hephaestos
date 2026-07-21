@@ -31,6 +31,22 @@ def test_index_references_app_js_and_has_no_inline_app_script(tmp_path):
     assert '/static/app.js' in r.text
     assert "togglePlayers" not in r.text
 
+def test_version_endpoint(tmp_path):
+    """La version applicative est exposee via /api/version (source unique = app.__version__)."""
+    from app import __version__
+    r = TestClient(create_app(make_settings(tmp_path))).get("/api/version")
+    assert r.status_code == 200
+    assert r.json() == {"version": __version__}
+    assert __version__ == "1.0.0"
+
+def test_index_shows_version(tmp_path):
+    """La version est affichee en bas a gauche de l'app (element #appVersion peuple par app.js)."""
+    r = TestClient(create_app(make_settings(tmp_path))).get("/")
+    assert 'id="appVersion"' in r.text
+    js = TestClient(create_app(make_settings(tmp_path))).get("/static/app.js").text
+    assert "/api/version" in js
+    assert "appVersion" in js
+
 def test_app_js_renders_without_reference_errors():
     """Smoke node : rend une carte serveur complete dans un DOM stub -- attrape les
     ReferenceError de rendu invisibles pour node --check (regression anyPending 15/07)."""

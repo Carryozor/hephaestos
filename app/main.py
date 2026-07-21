@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import (
+    __version__,
     routes_admin,
     routes_agent,
     routes_auth,
@@ -45,6 +46,10 @@ def create_app(settings: Settings, http_client: httpx.AsyncClient | None = None)
     @app.get("/api/health")
     async def health():
         return {"ok": True}
+
+    @app.get("/api/version")
+    async def version():
+        return {"version": __version__}
 
     @app.get("/api/public/health/{name}")
     async def public_health(name: str):
