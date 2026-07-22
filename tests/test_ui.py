@@ -47,6 +47,19 @@ def test_index_shows_version(tmp_path):
     assert "/api/version" in js
     assert "appVersion" in js
 
+def test_index_has_annunciator_tiles(tmp_path):
+    """Bandeau d'annonciateurs (pupitre braise) : 4 tuiles d'etat global au-dessus de la recherche."""
+    r = TestClient(create_app(make_settings(tmp_path))).get("/")
+    assert r.status_code == 200
+    for id_ in ("annAgentLamp", "annAgentValue", "annOnlineLamp", "annOnlineValue",
+                "annUpdatesLamp", "annUpdatesValue", "annModsLamp", "annModsValue"):
+        assert f'id="{id_}"' in r.text, id_
+
+def test_app_js_has_render_annunciators(tmp_path):
+    r = TestClient(create_app(make_settings(tmp_path))).get("/static/app.js")
+    assert r.status_code == 200
+    assert "renderAnnunciators" in r.text
+
 def test_app_js_renders_without_reference_errors():
     """Smoke node : rend une carte serveur complete dans un DOM stub -- attrape les
     ReferenceError de rendu invisibles pour node --check (regression anyPending 15/07)."""

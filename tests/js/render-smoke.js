@@ -398,6 +398,74 @@ if (!diff.some(l => l.type === "add") || !diff.some(l => l.type === "del")) {
   throw new Error("simpleLineDiff doit distinguer les lignes ajoutees/supprimees");
 }
 
+// --- bandeau d'annonciateurs (pupitre braise) : etat global en 1 coup d'oeil ---
+const annServerA = {
+  name: "srvA", display_name: "Srv A", status: "running",
+  state: { process_up: true, last_seen: new Date().toISOString() },
+  update_available: true, auto_update_blocked: false,
+  mods: [{ update_available: true }, { update_available: false }],
+};
+const annServerB = {
+  name: "srvB", display_name: "Srv B", status: "running",
+  state: { process_up: false, last_seen: new Date(Date.now() - 600000).toISOString() },
+  update_available: false, auto_update_blocked: false,
+  mods: [],
+};
+sandbox.renderAnnunciators([annServerA, annServerB]);
+if (sandbox.document.getElementById("annAgentLamp").className !== "lamp ok") {
+  throw new Error("annonciateurs : agent vu il y a < 180s doit etre lamp ok");
+}
+if (!sandbox.document.getElementById("annAgentValue").innerHTML.includes("vu")) {
+  throw new Error("annonciateurs : valeur agent doit mentionner la derniere vue");
+}
+if (sandbox.document.getElementById("annOnlineValue").innerHTML !== "1 / 2") {
+  throw new Error("annonciateurs : compte en ligne incorrect, attendu '1 / 2'");
+}
+if (sandbox.document.getElementById("annOnlineLamp").className !== "lamp ok") {
+  throw new Error("annonciateurs : au moins 1 serveur en ligne doit donner lamp ok");
+}
+if (sandbox.document.getElementById("annUpdatesLamp").className !== "lamp warn") {
+  throw new Error("annonciateurs : une maj en attente doit donner lamp warn");
+}
+if (sandbox.document.getElementById("annUpdatesValue").innerHTML !== "1 en attente") {
+  throw new Error("annonciateurs : texte maj incorrect, attendu '1 en attente'");
+}
+if (sandbox.document.getElementById("annModsLamp").className !== "lamp warn") {
+  throw new Error("annonciateurs : un mod avec maj disponible doit donner lamp warn");
+}
+if (sandbox.document.getElementById("annModsValue").innerHTML !== "1 maj dispo") {
+  throw new Error("annonciateurs : texte mods incorrect, attendu '1 maj dispo'");
+}
+
+// agent perime (last_seen >= 180s) -> lamp warn
+sandbox.renderAnnunciators([{
+  name: "srvC", status: "running",
+  state: { process_up: true, last_seen: new Date(Date.now() - 600000).toISOString() },
+  update_available: false, auto_update_blocked: false, mods: [],
+}]);
+if (sandbox.document.getElementById("annAgentLamp").className !== "lamp warn") {
+  throw new Error("annonciateurs : agent perime (10 min) doit donner lamp warn");
+}
+
+// aucun serveur -> lamp off + "jamais vu"
+sandbox.renderAnnunciators([]);
+if (sandbox.document.getElementById("annAgentLamp").className !== "lamp off") {
+  throw new Error("annonciateurs : aucun serveur doit donner lamp off");
+}
+if (sandbox.document.getElementById("annAgentValue").innerHTML !== "jamais vu") {
+  throw new Error("annonciateurs : aucun serveur doit afficher 'jamais vu'");
+}
+
+// maj auto bloquee (joueurs inconnus) -> suffixe explicite sur la tuile MAJ
+sandbox.renderAnnunciators([{
+  name: "srvD", status: "running",
+  state: { process_up: true, last_seen: new Date().toISOString() },
+  update_available: true, auto_update_blocked: true, mods: [],
+}]);
+if (!sandbox.document.getElementById("annUpdatesValue").innerHTML.includes("bloquée : joueurs inconnus")) {
+  throw new Error("annonciateurs : suffixe de blocage MAJ absent");
+}
+
 (async () => {
   // Flush toute promesse en attente depuis le chargement initial du script (avant
   // ce tout premier await du fichier -- ex. un fetchMe() jamais resolu) : sans ca elle

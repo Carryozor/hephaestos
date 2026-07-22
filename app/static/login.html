@@ -11,8 +11,8 @@
     color-scheme: dark;
     --font-sans: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
     --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
-    --bg: #0d1013; --surface: #151a20; --border: #27313b;
-    --text: #d9e2ea; --muted: #7c8996; --accent: #ef5622; --bad: #e2605a;
+    --bg: #16120C; --surface: #1F1910; --border: #3B3019;
+    --text: #F0E7D3; --muted: #A2967C; --accent: #E8622C; --accent-2: #F5A34A; --bad: #D9534F;
   }
   * { box-sizing: border-box; }
   body {
@@ -20,32 +20,33 @@
     font-family: var(--font-sans); color: var(--text); background: var(--bg);
   }
   .panel { width: 320px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; }
-  .panel-top { height: 3px; background: var(--accent); }
+  .panel-top { height: 2px; background: var(--accent); }
   .panel-body { padding: 1.9rem 1.6rem 1.6rem; }
   .brand { display: flex; align-items: center; gap: .5rem; margin-bottom: .3rem; }
   .brand-mark { width: auto; height: 40px; flex: none; }
-  .brand-name { font-size: .85rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #f0f3f5; }
+  .brand-name { font-size: .85rem; font-weight: 900; letter-spacing: .2em; text-transform: uppercase; color: #F7EFDF; }
+  .brand-name b { color: var(--accent); font-weight: 900; }
   .eyebrow { font-size: .68rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-bottom: 1.5rem; }
   .intro { font-size: .82rem; line-height: 1.5; color: var(--muted); margin-bottom: 1.3rem; }
   label { display: block; font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: .35rem; margin-top: 1rem; }
   label:first-of-type { margin-top: 0; }
   input {
-    width: 100%; padding: .6rem .7rem; border-radius: 3px; font-size: .9rem; font-family: var(--font-mono);
+    width: 100%; padding: .6rem .7rem; border-radius: 0; font-size: .9rem; font-family: var(--font-mono);
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
     transition: border-color 150ms ease, box-shadow 150ms ease;
   }
-  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(239,86,34,.2); }
+  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(232,98,44,.2); }
   .hint { font-size: .68rem; color: var(--muted); margin-top: .35rem; }
   button {
-    width: 100%; margin-top: 1.5rem; padding: .7rem; border: 1px solid var(--accent); border-radius: 3px;
+    width: 100%; margin-top: 1.5rem; padding: .7rem; border: 1px solid var(--accent); border-radius: 0;
     font-family: inherit; font-size: .78rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
     color: var(--accent); background: transparent; cursor: pointer; transition: all 150ms ease;
   }
-  button:hover { background: rgba(239,86,34,.12); }
-  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:hover { background: rgba(232,98,44,.12); }
+  button:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
   .msg {
     display: none; margin-top: 1.1rem; padding: .55rem .7rem; border-radius: 3px; font-size: .8rem;
-    background: rgba(217,97,90,.12); border: 1px solid rgba(217,97,90,.4); color: #ff9d95;
+    background: rgba(217,83,79,.12); border: 1px solid rgba(217,83,79,.4); color: #F0A9A0;
   }
   [hidden] { display: none !important; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
@@ -55,7 +56,7 @@
 <div class="panel">
   <div class="panel-top"></div>
   <div class="panel-body">
-    <div class="brand"><img class="brand-mark" src="/static/assets/logo-mark.png" alt=""><span class="brand-name">Hephaestos</span></div>
+    <div class="brand"><img class="brand-mark" src="/static/assets/logo-mark.png" alt=""><span class="brand-name">HEPHAEST<b>OS</b></span></div>
 
     <!-- Formulaire de connexion (cas normal) -->
     <form id="loginForm" novalidate hidden>

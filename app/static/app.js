@@ -163,6 +163,69 @@ function renderNameGroup(s) {
   return `${iconHtml}<img class="symbol-icon" src="${esc(assets.symbol)}" alt=""><span class="name">${esc(s.display_name)}</span>`;
 }
 
+// --- bandeau d'annonciateurs (pupitre braise) : etat global en un coup d'oeil,
+// recalcule a chaque repeuplement de la grille (renderGrid). ---
+function setLamp(id, state) {
+  const el = document.getElementById(id);
+  if (el) el.className = `lamp ${state}`;
+}
+
+function setAnnValue(id, html) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
+
+function renderAnnunciators(servers) {
+  const list = servers || [];
+
+  // Agent Windows : dernier last_seen tous serveurs confondus (l'agent poll tous les
+  // serveurs a intervalle regulier -- le plus recent des last_seen est donc le meilleur
+  // proxy de "l'agent est vivant").
+  const seenTimes = list
+    .map(s => s.state && s.state.last_seen)
+    .filter(Boolean)
+    .map(iso => new Date(iso).getTime())
+    .filter(t => !Number.isNaN(t));
+  if (seenTimes.length === 0) {
+    setLamp("annAgentLamp", "off");
+    setAnnValue("annAgentValue", "jamais vu");
+  } else {
+    const mostRecent = Math.max(...seenTimes);
+    const deltaSeconds = (Date.now() - mostRecent) / 1000;
+    setLamp("annAgentLamp", deltaSeconds < 180 ? "ok" : "warn");
+    setAnnValue("annAgentValue", `vu ${relativeTime(new Date(mostRecent).toISOString())}`);
+  }
+
+  // Serveurs en ligne : x/y, en excluant les serveurs en cours de deploiement (pas encore
+  // de process a superviser).
+  const eligible = list.filter(s => s.status !== "installing" && s.status !== "awaiting_setup");
+  const onlineCount = eligible.filter(s => s.state && s.state.process_up === true).length;
+  setLamp("annOnlineLamp", onlineCount >= 1 ? "ok" : "off");
+  setAnnValue("annOnlineValue", `${onlineCount} / ${eligible.length}`);
+
+  // MAJ serveurs en attente + signalement du blocage auto-update (0 joueur inconnu).
+  const updatesCount = list.filter(s => s.update_available).length;
+  const anyBlocked = list.some(s => s.auto_update_blocked);
+  if (updatesCount === 0) {
+    setLamp("annUpdatesLamp", "ok");
+    setAnnValue("annUpdatesValue", "aucune");
+  } else {
+    setLamp("annUpdatesLamp", "warn");
+    const suffix = anyBlocked ? " · bloquée : joueurs inconnus" : "";
+    setAnnValue("annUpdatesValue", `${updatesCount} en attente${suffix}`);
+  }
+
+  // Mods Workshop : somme des mods avec update_available sur tous les serveurs.
+  const modsCount = list.reduce((sum, s) => sum + (s.mods || []).filter(m => m.update_available).length, 0);
+  if (modsCount === 0) {
+    setLamp("annModsLamp", "ok");
+    setAnnValue("annModsValue", "à jour");
+  } else {
+    setLamp("annModsLamp", "warn");
+    setAnnValue("annModsValue", `${modsCount} maj dispo`);
+  }
+}
+
 function buildActionButtons(s) {
   const up = s.state ? s.state.process_up : null;
   const anyPending = s.pending_orders.length > 0;
@@ -198,6 +261,12 @@ function renderCard(s) {
   const autoUpdateBlockedFlag = s.auto_update_blocked
     ? `<div class="flag flag-warn">maj auto impossible : joueurs inconnus</div>`
     : "";
+  const versionCell = s.update_available
+    ? `${esc(local)} <span class="version-target">→ ${esc(s.public_buildid)}</span>`
+    : `${esc(local)} → ${esc(s.public_buildid)}`;
+  const startedByLine = s.started_by
+    ? `<div class="datarow srow-band mono"><span>lancé par</span><span>${esc(s.started_by.author || "—")}${s.started_by.at ? ` · ${relativeTime(s.started_by.at)}` : ""}</span></div>`
+    : "";
   const queue = s.order_queue || [];
   const pendingText = queue.length
     ? `<div class="pending">${queue.map((o) =>
@@ -209,21 +278,20 @@ function renderCard(s) {
     : "";
 
   const card = document.createElement("div");
-  card.className = "card";
+  card.className = "srow";
   card.innerHTML = `
-    <div class="row1">
-      <div class="name-group">${renderNameGroup(s)}</div>
-      <span class="pill ${statusClass}"><span class="dot"></span>${esc(statusText)}</span>
-    </div>
+    <div class="name-group">${renderNameGroup(s)}</div>
+    <span class="pill ${statusClass}"><span class="dot"></span>${esc(statusText)}</span>
+    <div class="datarow${clickablePlayers ? " clickable" : ""} mono"${clickablePlayers ? ` onclick="togglePlayers('${esc(s.name)}')"` : ""}><span>${esc(players)}</span></div>
+    <div class="mono">${versionCell}</div>
+    <div class="mono">${esc(lastSeen)}</div>
+    <div class="row-actions"></div>
     ${updateFlag}
     ${autoUpdateBlockedFlag}
-    <div class="datarow${clickablePlayers ? " clickable" : ""}" ${clickablePlayers ? `onclick="togglePlayers('${esc(s.name)}')"` : ""}><span>joueurs</span><span>${esc(players)}</span></div>
     <div class="players-detail" id="players-detail-${esc(s.name)}"></div>
-    <div class="datarow"><span>version</span><span>${esc(local)} → ${esc(s.public_buildid)}</span></div>
-    ${s.started_by ? `<div class="datarow"><span>lancé par</span><span>${esc(s.started_by.author || "—")}${s.started_by.at ? ` · ${relativeTime(s.started_by.at)}` : ""}</span></div>` : ""}
-    <div class="datarow"><span>vu</span><span>${esc(lastSeen)}</span></div>
-    ${renderModsSummary(s)}
+    <div class="srow-band">${renderModsSummary(s)}</div>
     ${pendingText}
+    ${startedByLine}
   `;
 
   card.addEventListener("click", (e) => {
@@ -231,10 +299,8 @@ function renderCard(s) {
     openServerDetail(s.name);
   });
 
-  const actions = document.createElement("div");
-  actions.className = "card-actions";
-  for (const btn of buildActionButtons(s)) actions.appendChild(btn);
-  card.appendChild(actions);
+  const actionsCell = card.querySelector(".row-actions");
+  for (const btn of buildActionButtons(s)) actionsCell.appendChild(btn);
   return card;
 }
 
@@ -246,18 +312,20 @@ function renderDeployCard(s) {
     ? `<div class="pending">${queue.map(o => `${esc(o.type)}${o.status === "running" ? " — en cours" : ""}`).join("<br>")}</div>`
     : "";
   const card = document.createElement("div");
-  card.className = "card card-deploy";
+  card.className = "srow card-deploy";
   card.innerHTML = `
-    <div class="row1">
-      <div class="name-group"><span class="name">${esc(s.display_name || s.name)}</span></div>
-      <span class="pill unknown"><span class="dot"></span>${esc(label)}</span>
-    </div>
-    <div class="datarow"><span>appid</span><span>${esc(s.server_appid)}</span></div>
+    <div class="name-group"><span class="name">${esc(s.display_name || s.name)}</span></div>
+    <span class="pill unknown"><span class="dot"></span>${esc(label)}</span>
+    <div class="mono">—</div>
+    <div class="mono">appid ${esc(s.server_appid)}</div>
+    <div class="mono">—</div>
+    <div class="row-actions"></div>
     ${pendingText}`;
   if (!isInstalling && currentUser && currentUser.role === "admin") {
     const actions = document.createElement("div");
-    actions.className = "card-actions";
+    actions.className = "row-actions srow-band";
     const btn = document.createElement("button");
+    btn.className = "action";
     btn.textContent = "Finaliser";
     btn.onclick = () => openFinalize(s.name);
     actions.appendChild(btn);
@@ -1537,6 +1605,7 @@ function renderGrid() {
   for (const s of sorted) grid.appendChild(renderCard(s));
   restoreOpenPanels();
   renderDetailFromLatest();
+  renderAnnunciators(latestServers);
   const discoveredEl = document.getElementById("discovered");
   if (discoveredEl) discoveredEl.innerHTML = renderDiscoveredGames(discoveredGames);
 }
