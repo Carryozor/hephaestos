@@ -21,7 +21,7 @@ def test_app_js_served_with_ui_hooks(tmp_path):
     """Le JS applicatif vit dans /static/app.js (extrait de index.html)."""
     r = TestClient(create_app(make_settings(tmp_path))).get("/static/app.js")
     assert r.status_code == 200
-    for hook in ("togglePlayers", "renderDetailMods", "renderWorkshopBrowser",
+    for hook in ("togglePlayers", "toggleMods", "renderDetailMods", "renderWorkshopBrowser",
                  "cancelOrder", "auto_update_blocked"):
         assert hook in r.text, hook
 

@@ -88,6 +88,9 @@
   .version-target { color: var(--accent-2); }
   .players-detail { display: none; grid-column: 1 / -1; font-size: .78rem; font-family: var(--font-mono); color: var(--muted); padding: .4rem 0 .2rem; border-top: 1px solid var(--border); }
   .players-detail.open { display: block; }
+  .mods-toggle span:first-child { color: var(--muted); }
+  .mods-detail { display: none; grid-column: 1 / -1; }
+  .mods-detail.open { display: block; }
   .players-detail-row { display: flex; justify-content: space-between; padding: .15rem 0; }
   .players-detail-row span:last-child { color: var(--text); font-variant-numeric: tabular-nums; }
   .player-link { color: inherit; text-decoration: underline dotted; text-underline-offset: 3px; }
@@ -314,6 +317,7 @@
   .mods-ev.ev-updated { color: var(--warn); background: rgba(227,169,60,.12); }
   .mods-recent-title { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mods-recent-date { flex: none; color: var(--muted); }
+  .mods-toggle-count { color: var(--warn); font-weight: 600; }
 
   .workshop-toggle { font-size: .68rem; color: var(--muted); cursor: pointer; margin-left: .6rem; text-decoration: underline; }
   .workshop-toggle:hover { color: var(--accent); }

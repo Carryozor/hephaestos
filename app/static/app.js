@@ -15,7 +15,9 @@ let modalResolve = null;
 // soit jamais reapplique au DOM neuf -- bug signale le 2026-07-15 ("le workshop
 // disparait apres un certain temps"). restoreOpenPanels() corrige ca pour la grille ;
 // renderDetailFromLatest() fait la meme chose pour l'overlay detail (mods, workshop).
+// openModsPanels (bandeau mods replie/deplie de la ligne serveur) suit le meme principe.
 let openPlayersDetail = new Set();
+let openModsPanels = new Set();
 let openFileEditor = null;  // {name, root, path, sha256} pendant l'edition, sinon null
 // files_listing/file_read ne sont renvoyes que par GET /detail, jamais par la liste
 // /api/servers (latestServers) -- dernier /detail charge, utilise par renderDetailFromLatest
@@ -197,11 +199,22 @@ function renderAnnunciators(servers) {
   }
 
   // Serveurs en ligne : x/y, en excluant les serveurs en cours de deploiement (pas encore
-  // de process a superviser).
+  // de process a superviser). Ajoute le total de joueurs connectes quand au moins un
+  // serveur eligible rapporte un nombre (les autres etats -- null, absent -- sont ignores
+  // sans faire echouer le total, plutot que de forcer 0 partout).
   const eligible = list.filter(s => s.status !== "installing" && s.status !== "awaiting_setup");
   const onlineCount = eligible.filter(s => s.state && s.state.process_up === true).length;
+  const playerCounts = eligible
+    .map(s => s.state && s.state.players)
+    .filter(p => typeof p === "number");
   setLamp("annOnlineLamp", onlineCount >= 1 ? "ok" : "off");
-  setAnnValue("annOnlineValue", `${onlineCount} / ${eligible.length}`);
+  if (playerCounts.length > 0) {
+    const totalPlayers = playerCounts.reduce((sum, p) => sum + p, 0);
+    const label = totalPlayers <= 1 ? "joueur" : "joueurs";
+    setAnnValue("annOnlineValue", `${onlineCount} / ${eligible.length} · ${totalPlayers} ${label}`);
+  } else {
+    setAnnValue("annOnlineValue", `${onlineCount} / ${eligible.length}`);
+  }
 
   // MAJ serveurs en attente + signalement du blocage auto-update (0 joueur inconnu).
   const updatesCount = list.filter(s => s.update_available).length;
@@ -267,6 +280,29 @@ function renderCard(s) {
   const startedByLine = s.started_by
     ? `<div class="datarow srow-band mono"><span>lancé par</span><span>${esc(s.started_by.author || "—")}${s.started_by.at ? ` · ${relativeTime(s.started_by.at)}` : ""}</span></div>`
     : "";
+  // Bande mods repliee par defaut (ligne toggle compacte + panneau) : meme condition
+  // d'affichage que renderModsSummary, dont la sortie EXACTE (inchangee) est rendue a
+  // l'interieur, seulement quand le panneau est deplie -- l'etat ouvert vit dans
+  // openModsPanels et survit au re-render du polling (renderGrid appelle renderCard
+  // depuis zero toutes les 10s, ce Set est lu ici a chaque passage).
+  let modsBand = "";
+  if ("workshop_appid" in s) {
+    const mods = s.mods || [];
+    const installedCount = mods.filter(m => m.installed).length;
+    const needsUpdate = mods.filter(m => m.update_available).length;
+    const isOpen = openModsPanels.has(s.name);
+    const chevron = isOpen ? "▾" : "▸";
+    const updatePart = needsUpdate > 0
+      ? ` · <span class="mods-toggle-count">${needsUpdate} maj dispo</span>`
+      : "";
+    const restartPart = s.mods_restart_required
+      ? ` · <span class="mods-toggle-count">redémarrage requis</span>`
+      : "";
+    modsBand = `
+      <div class="datarow clickable mods-toggle srow-band" onclick="toggleMods('${esc(s.name)}')"><span>${chevron}</span><span>mods : ${installedCount} installés${updatePart}${restartPart}</span></div>
+      <div class="mods-detail${isOpen ? " open" : ""}" id="mods-detail-${esc(s.name)}">${renderModsSummary(s)}</div>
+    `;
+  }
   const queue = s.order_queue || [];
   const pendingText = queue.length
     ? `<div class="pending">${queue.map((o) =>
@@ -289,13 +325,13 @@ function renderCard(s) {
     ${updateFlag}
     ${autoUpdateBlockedFlag}
     <div class="players-detail" id="players-detail-${esc(s.name)}"></div>
-    <div class="srow-band">${renderModsSummary(s)}</div>
+    ${modsBand}
     ${pendingText}
     ${startedByLine}
   `;
 
   card.addEventListener("click", (e) => {
-    if (e.target.closest && e.target.closest("button, .datarow.clickable, .players-detail, input, select, .workshop-toggle")) return;
+    if (e.target.closest && e.target.closest("button, .datarow.clickable, .players-detail, .mods-detail, input, select, .workshop-toggle")) return;
     openServerDetail(s.name);
   });
 
@@ -661,6 +697,20 @@ function restorePlayersDetail(name) {
     renderPlayersDetailContent(name, playersCache[name]);
   } else {
     togglePlayers(name);
+  }
+}
+
+// Contrairement a togglePlayers, la donnee (s.mods) est deja disponible dans
+// latestServers -- pas de fetch : renderCard rend le contenu integral a chaque passage,
+// toggleMods ne fait que basculer la visibilite (Set + classe "open").
+function toggleMods(name) {
+  const el = document.getElementById(`mods-detail-${name}`);
+  if (openModsPanels.has(name)) {
+    openModsPanels.delete(name);
+    if (el) el.classList.remove("open");
+  } else {
+    openModsPanels.add(name);
+    if (el) el.classList.add("open");
   }
 }
 
@@ -1612,6 +1662,13 @@ function renderGrid() {
 
 function restoreOpenPanels() {
   for (const name of openPlayersDetail) restorePlayersDetail(name);
+  // renderCard applique deja la classe "open" a la construction (openModsPanels.has(name)) :
+  // ce second passage est une garantie idempotente si un jour le panneau mods redevient
+  // charge separement (comme players-detail), sur le meme principe que ci-dessus.
+  for (const name of openModsPanels) {
+    const el = document.getElementById(`mods-detail-${name}`);
+    if (el) el.classList.add("open");
+  }
 }
 
 async function fetchServers() {

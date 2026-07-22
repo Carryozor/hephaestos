@@ -466,6 +466,68 @@ if (!sandbox.document.getElementById("annUpdatesValue").innerHTML.includes("bloq
   throw new Error("annonciateurs : suffixe de blocage MAJ absent");
 }
 
+// total de joueurs connectes dans la tuile "serveurs en ligne"
+sandbox.renderAnnunciators([
+  { name: "p1", status: "running", state: { process_up: true, players: 7, last_seen: new Date().toISOString() },
+    update_available: false, auto_update_blocked: false, mods: [] },
+  { name: "p2", status: "running", state: { process_up: true, players: 3, last_seen: new Date().toISOString() },
+    update_available: false, auto_update_blocked: false, mods: [] },
+]);
+if (!sandbox.document.getElementById("annOnlineValue").innerHTML.includes("10 joueurs")) {
+  throw new Error("annonciateurs : total joueurs incorrect, attendu '10 joueurs'");
+}
+sandbox.renderAnnunciators([
+  { name: "p3", status: "running", state: { process_up: true, players: null, last_seen: new Date().toISOString() },
+    update_available: false, auto_update_blocked: false, mods: [] },
+  { name: "p4", status: "running", state: { process_up: false, players: null, last_seen: new Date().toISOString() },
+    update_available: false, auto_update_blocked: false, mods: [] },
+]);
+if (sandbox.document.getElementById("annOnlineValue").innerHTML.includes("joueur")) {
+  throw new Error("annonciateurs : total joueurs ne doit pas apparaitre si aucune valeur numerique");
+}
+
+// --- mods replies par defaut : ligne toggle compacte + panneau deplie au clic ---
+const modsToggleServer = {
+  name: "modstoggle", display_name: "Mods Toggle Server", server_appid: 1,
+  workshop_appid: 1623730, mods_restart_required: false,
+  state: { process_up: true, players: 1, buildid: "1", last_seen: new Date().toISOString(), process_started_at: null },
+  public_buildid: "1", update_available: false, auto_update_blocked: false,
+  pending_orders: [], order_queue: [],
+  mods: [
+    { workshop_id: "1", title: "Mod", thumbnail_url: null, installed: true,
+      installed_at: "2026-07-10T00:00:00+00:00", steam_updated_at: null, update_available: false },
+  ],
+};
+const modsCardClosed = vm.runInContext("renderCard", sandbox)(modsToggleServer);
+if (!modsCardClosed.innerHTML.includes("mods-toggle")) {
+  throw new Error("mods : ligne toggle (mods-toggle) absente du rendu");
+}
+if (!modsCardClosed.innerHTML.includes("mods-detail")) {
+  throw new Error("mods : conteneur mods-detail absent du rendu");
+}
+if (modsCardClosed.innerHTML.includes("mods-detail open")) {
+  throw new Error("mods : panneau doit etre replie par defaut (pas de classe open)");
+}
+if (!modsCardClosed.innerHTML.includes("1 installés")) {
+  throw new Error("mods : compte absent de la ligne toggle");
+}
+
+sandbox.toggleMods("modstoggle");
+if (vm.runInContext("openModsPanels.has('modstoggle')", sandbox) !== true) {
+  throw new Error("toggleMods : premier appel doit ajouter au Set openModsPanels");
+}
+sandbox.toggleMods("modstoggle");
+if (vm.runInContext("openModsPanels.has('modstoggle')", sandbox) !== false) {
+  throw new Error("toggleMods : second appel doit retirer du Set openModsPanels");
+}
+
+vm.runInContext("openModsPanels.add('modstoggle')", sandbox);
+const modsCardOpen = vm.runInContext("renderCard", sandbox)(modsToggleServer);
+if (!modsCardOpen.innerHTML.includes("mods-detail open")) {
+  throw new Error("mods : openModsPanels doit forcer la classe open au rendu de renderCard");
+}
+vm.runInContext("openModsPanels.delete('modstoggle')", sandbox);
+
 (async () => {
   // Flush toute promesse en attente depuis le chargement initial du script (avant
   // ce tout premier await du fichier -- ex. un fetchMe() jamais resolu) : sans ca elle
