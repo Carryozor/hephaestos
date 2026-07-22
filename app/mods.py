@@ -156,7 +156,7 @@ async def build_mods_entry_fields(request: Request, name: str, cfg: dict, state:
 
 
 async def enqueue_mod_update_orders(request: Request, name: str, *, include_unknown_dates: bool,
-                                    author: str | None = None) -> dict:
+                                    author: str | None = None, require_players_zero: bool = False) -> dict:
     """Cree les ordres install_mod pour les mods installes a mettre a jour, puis UN
     restart final si le process tourne (le drainage agent traite la file dans l'ordre :
     tous les installs, puis le restart applique les mods).
@@ -168,12 +168,20 @@ async def enqueue_mod_update_orders(request: Request, name: str, *, include_unkn
     - saute les mods ayant deja un install_mod en attente ; pas de restart si le
       process est down (les mods seront pris au prochain demarrage) ou si un restart
       est deja en file.
+    - `require_players_zero` (chemin auto uniquement, jamais le bouton manuel) :
+      re-verifie l'etat juste apres l'appel reseau Steam ci-dessous avant de creer le
+      moindre ordre -- ferme le TOCTOU entre le players==0 lu par l'appelant et cet
+      appel reseau, pendant lequel un joueur a pu se connecter.
     Retourne {"orders_created": n, "restart": bool}.
     """
     store = request.app.state.store
     mods_state = await store.mods.get_mods_state(name)
     installed = list(mods_state["installed_mod_ids"])
     await refresh_mods_steam_dates(request, name, sorted(installed))
+    if require_players_zero:
+        fresh = await store.snapshot()
+        if (fresh["servers"].get(name) or {}).get("players") != 0:
+            return {"orders_created": 0, "restart": False}
     metadata = await store.mods.get_mods_metadata(name)
     pending = [o for o in await store.pending_orders() if o["server"] == name]
     pending_install_ids = {o.get("workshop_id") for o in pending if o["type"] == "install_mod"}
@@ -213,13 +221,18 @@ async def auto_enqueue_mod_updates(request: Request) -> None:
     store = request.app.state.store
     try:
         snap = await store.snapshot()
+        # Chargee une seule fois (comme game_updates.auto_enqueue_game_updates) :
+        # sans ca, pending_orders() relit et re-parse state.json en entier pour
+        # CHAQUE serveur Workshop de la boucle.
+        pending = await store.pending_orders()
+        servers_with_pending = {o["server"] for o in pending}
         for name, cfg in (await store.registry.all()).items():
             if "workshop_appid" not in cfg:
                 continue
             state = snap["servers"].get(name) or {}
             if state.get("players") != 0:
                 continue
-            if any(o["server"] == name for o in await store.pending_orders()):
+            if name in servers_with_pending:
                 continue
             marker = await store.mods.get_mods_auto_marker(name)
             if marker is not None:
@@ -229,7 +242,7 @@ async def auto_enqueue_mod_updates(request: Request) -> None:
                 except (ValueError, TypeError):
                     pass  # marqueur illisible = pas de cooldown
             result = await enqueue_mod_update_orders(request, name, include_unknown_dates=False,
-                                                     author="auto")
+                                                     author="auto", require_players_zero=True)
             if result["orders_created"]:
                 await store.mods.set_mods_auto_marker(name)
                 logger.info("auto-update mods %s : %d install(s), restart=%s",

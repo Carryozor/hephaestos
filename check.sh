@@ -7,10 +7,13 @@ cd "$(dirname "$0")"
 MYPY=.venv-tools/bin/mypy
 [ -x "$MYPY" ] || { echo "mypy absent : python3 -m venv .venv-tools && .venv-tools/bin/pip install mypy" >&2; exit 1; }
 
+echo "== pytest =="
+.venv/bin/python -m pytest -q
+
 echo "== ruff =="
 ruff check app tests
 
 echo "== mypy =="
 "$MYPY"
 
-echo "OK: ruff + mypy verts"
+echo "OK: pytest + ruff + mypy verts"

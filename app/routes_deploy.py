@@ -62,10 +62,6 @@ async def search_deploy_candidates(request: Request, q: str):
     # pertinente en entier -- un terme large ("server") correspond a la quasi-totalite
     # d'entre elles (toutes nommees "... Dedicated Server"). Seul le repli boutique
     # Steam est deja borne (search_apps limite lui-meme a 20).
-    # Pas de troncature globale : la liste locale (curee, <=67 entrees) est toujours
-    # pertinente en entier -- un terme large ("server") correspond a la quasi-totalite
-    # d'entre elles (toutes nommees "... Dedicated Server"). Seul le repli boutique
-    # Steam est deja borne (search_apps limite lui-meme a 20).
     merged = known + [r for r in steam_results if r["appid"] not in known_appids]
     return {"results": merged}
 

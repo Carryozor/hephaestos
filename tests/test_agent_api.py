@@ -169,6 +169,23 @@ def test_agent_state_report_accepts_rcon_and_process_metrics(tmp_path):
     assert detail["process"] == {"cpu_percent": 3.2, "mem_mb": 812.0}
 
 
+def test_agent_state_report_rejects_negative_process_metrics(tmp_path):
+    c = make_client(tmp_path)
+    r = c.post(
+        "/api/agent/state",
+        headers=AGT,
+        json={"servers": {"palworld": {"process_up": True, "process_cpu_percent": -1.0}}},
+    )
+    assert r.status_code == 422
+
+    r = c.post(
+        "/api/agent/state",
+        headers=AGT,
+        json={"servers": {"palworld": {"process_up": True, "process_mem_mb": -5.0}}},
+    )
+    assert r.status_code == 422
+
+
 def test_order_terminal_state_is_final(tmp_path):
     c = make_client(tmp_path)
     oid = c.post("/api/servers/palworld/update").json()["id"]

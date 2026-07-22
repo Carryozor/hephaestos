@@ -17,7 +17,13 @@ def load_settings() -> Settings:
     servers_file = Path(os.environ.get("HEPHAESTOS_SERVERS_FILE", "/data/servers.json"))
     if not servers_file.exists():
         raise SystemExit(f"fichier de config serveurs introuvable: {servers_file}")
-    servers = json.loads(servers_file.read_text())
+    try:
+        servers = json.loads(servers_file.read_text())
+    except json.JSONDecodeError as e:
+        # Sans ce garde-fou, un servers.json edite a la main et mal forme fait
+        # planter le process avec une traceback brute -- et comme restart:unless-stopped
+        # relance le conteneur a l'identique, ca boucle indefiniment sur la meme erreur.
+        raise SystemExit(f"servers.json invalide ({servers_file}): {e}") from e
     steam_api_key = os.environ.get("STEAM_API_KEY")
 
     return Settings(agent_token=agent_token, data_dir=data_dir, servers=servers, steam_api_key=steam_api_key,

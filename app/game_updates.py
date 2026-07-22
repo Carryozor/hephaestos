@@ -49,6 +49,13 @@ async def auto_enqueue_game_updates(request: Request) -> None:
                         continue
                 except (ValueError, TypeError):
                     pass  # marqueur illisible = pas de cooldown
+            # Re-verification juste avant l'ordre : players==0 a ete lu dans `snap`
+            # AVANT l'appel reseau steam.public_buildid() ci-dessus -- un joueur a pu
+            # se connecter pendant cet aller-retour (TOCTOU). Sans ce re-check, un
+            # ordre "update" pourrait etre cree alors qu'un joueur vient de rejoindre.
+            fresh = await store.snapshot()
+            if (fresh["servers"].get(name) or {}).get("players") != 0:
+                continue
             await store.add_order(name, "update", author="auto")
             await store.set_game_auto_marker(name)
             logger.info("auto-update jeu %s : ordre update cree (build %s -> %s)",

@@ -46,6 +46,7 @@ sed -i "s/REMPLACER_openssl_rand_hex_24/$(openssl rand -hex 24)/" .env   # jeton
 mkdir -p data
 cp servers.json data/servers.json
 cp known-dedicated-servers.json data/known-dedicated-servers.json
+chown 1000:1000 data   # le conteneur tourne en UID 1000 (non-root)
 
 # 3. Build + démarrage
 docker compose up -d --build

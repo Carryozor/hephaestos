@@ -521,6 +521,29 @@ def test_agent_poll_auto_enqueues_mod_updates_when_server_empty(tmp_path):
     assert data["mods_auto"]["palworld"]  # cooldown pose
 
 
+def test_mods_auto_update_skipped_if_player_joins_during_steam_lookup(tmp_path):
+    # TOCTOU : players==0 est lu AVANT l'appel reseau Steam (refresh_mods_steam_dates,
+    # dans enqueue_mod_update_orders). Un joueur qui rejoint PENDANT cet appel ne doit
+    # pas laisser passer l'ordre auto malgre l'etat initial vide.
+    import json
+
+    def handler(request):
+        data = json.loads((tmp_path / "state.json").read_text())
+        data["servers"]["palworld"]["players"] = 1
+        (tmp_path / "state.json").write_text(json.dumps(data))
+        url = str(request.url)
+        if "GetPublishedFileDetails" in url:
+            return httpx.Response(200, json={"response": {"publishedfiledetails": [
+                {"result": 1, "publishedfileid": "2", "title": "Perime",
+                 "preview_url": "", "time_updated": 1900000000},
+            ]}})
+        return httpx.Response(404)
+
+    c = make_client_with_workshop(tmp_path, workshop_handler=handler)
+    _write_mods_fleet(tmp_path, players=0)
+    assert [t for t, _ in _pending(c) if t in ("install_mod", "restart")] == []
+
+
 def test_agent_poll_no_auto_update_when_players_present_or_unknown(tmp_path):
     c = make_client_with_workshop(tmp_path)
     _write_mods_fleet(tmp_path, players=3)
@@ -564,6 +587,44 @@ def test_agent_poll_auto_enqueues_game_update_when_outdated_and_empty(tmp_path):
     assert [t for t, _ in _pending(c)] == ["update"]
     data = json.loads((tmp_path / "state.json").read_text())
     assert data["game_auto"]["palworld"]  # cooldown pose
+
+
+def test_game_auto_update_skipped_if_player_joins_during_steam_lookup(tmp_path):
+    # TOCTOU : players==0 est lu AVANT steam.public_buildid() (appel reseau). Un
+    # joueur qui rejoint PENDANT cet appel ne doit pas laisser passer l'ordre auto.
+    import asyncio
+    import json
+
+    import bcrypt
+    import httpx
+    from fastapi.testclient import TestClient
+
+    from app.config import Settings
+    from app.main import create_app
+
+    def handler(request):
+        data = json.loads((tmp_path / "state.json").read_text())
+        data["servers"]["palworld"]["players"] = 1
+        (tmp_path / "state.json").write_text(json.dumps(data))
+        return httpx.Response(200, json={"data": {"2394010": {
+            "depots": {"branches": {"public": {"buildid": "24088465"}}}}}})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    settings = Settings(agent_token="agent-t", data_dir=tmp_path,
+                        servers={"palworld": {"display_name": "Palworld", "server_appid": 2394010}})
+    app = create_app(settings, http_client=http_client)
+    password_hash = bcrypt.hashpw(b"testpass123", bcrypt.gensalt()).decode()
+    asyncio.run(app.state.store.create_user("tester", password_hash))
+    c = TestClient(app)
+    c.post("/api/login", json={"username": "tester", "password": "testpass123"})
+
+    data = json.loads((tmp_path / "state.json").read_text())
+    data["servers"] = {"palworld": {"buildid": "100", "process_up": True, "players": 0,
+                                    "last_seen": "2026-07-17T00:00:00+00:00"}}
+    (tmp_path / "state.json").write_text(json.dumps(data))
+
+    orders = c.get("/api/agent/orders", headers={"Authorization": "Bearer agent-t"}).json()["orders"]
+    assert orders == []
 
 
 def test_agent_poll_no_game_auto_update_when_up_to_date(tmp_path):

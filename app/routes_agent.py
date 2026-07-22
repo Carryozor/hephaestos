@@ -62,8 +62,8 @@ class ServerState(BaseModel):
     save_backups: list[SaveBackupInfo] | None = None
     process_started_at: str | None = None
     rcon_info: str | None = None
-    process_cpu_percent: float | None = None
-    process_mem_mb: float | None = None
+    process_cpu_percent: float | None = Field(default=None, ge=0)
+    process_mem_mb: float | None = Field(default=None, ge=0)
 
 
 class StateReport(BaseModel):

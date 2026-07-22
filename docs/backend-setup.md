@@ -50,6 +50,7 @@ Le conteneur monte `./data` (dans `deploy/`) sur `/data`. Deux fichiers de réf�
 mkdir -p data
 cp servers.json data/servers.json                                   # liste de vos serveurs
 cp known-dedicated-servers.json data/known-dedicated-servers.json   # catalogue pour la recherche
+chown 1000:1000 data                                                # le conteneur tourne en UID 1000 (non-root)
 ```
 
 `servers.json` décrit les serveurs que vous gérez. Exemple (adaptez à vos jeux) :

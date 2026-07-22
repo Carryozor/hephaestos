@@ -37,7 +37,7 @@ def test_version_endpoint(tmp_path):
     r = TestClient(create_app(make_settings(tmp_path))).get("/api/version")
     assert r.status_code == 200
     assert r.json() == {"version": __version__}
-    assert __version__ == "1.0.0"
+    assert __version__ == "1.0.1"
 
 def test_index_shows_version(tmp_path):
     """La version est affichee en bas a gauche de l'app (element #appVersion peuple par app.js)."""
