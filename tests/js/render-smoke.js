@@ -135,6 +135,28 @@ if (!Array.isArray(detailBtns) || detailBtns.length !== 4) {
 }
 vm.runInContext("renderDetailChrome(__sample)", sandbox);
 
+// --- en-tete : interrupteur auto-reboot, admin only (PUT registry = 403 pour "user") ---
+vm.runInContext(`currentUser = { username: "boss", role: "admin", servers: [] };`, sandbox);
+vm.runInContext("__sample = " + JSON.stringify({ ...sampleServer, auto_restart_on_crash: false }), sandbox);
+vm.runInContext("renderDetailChrome(__sample)", sandbox);
+let chromeHtml = vm.runInContext("detailStatus.innerHTML", sandbox);
+if (!chromeHtml.includes('class="aswitch"') || chromeHtml.includes('class="aswitch on"')) {
+  console.error("chrome : interrupteur auto-reboot absent ou faussement actif (etat off)"); process.exit(1);
+}
+vm.runInContext("__sample = " + JSON.stringify({ ...sampleServer, auto_restart_on_crash: true }), sandbox);
+vm.runInContext("renderDetailChrome(__sample)", sandbox);
+chromeHtml = vm.runInContext("detailStatus.innerHTML", sandbox);
+if (!chromeHtml.includes('class="aswitch on"')) {
+  console.error("chrome : interrupteur auto-reboot pas actif (etat on)"); process.exit(1);
+}
+vm.runInContext(`currentUser = { username: "gardien", role: "user", servers: ["palworld"] };`, sandbox);
+vm.runInContext("renderDetailChrome(__sample)", sandbox);
+chromeHtml = vm.runInContext("detailStatus.innerHTML", sandbox);
+if (chromeHtml.includes("aswitch")) {
+  console.error("chrome : interrupteur auto-reboot visible pour un compte non-admin (PUT registry = 403)"); process.exit(1);
+}
+vm.runInContext(`currentUser = { username: "boss", role: "admin", servers: [] };`, sandbox);
+
 // --- mods : chip d'etat unique + bouton "mettre a jour" ---
 const updServer = {
   name: "palworld", workshop_appid: 1623730, mods_restart_required: false,

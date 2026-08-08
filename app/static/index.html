@@ -78,6 +78,16 @@
   .pill.down { color: var(--bad); background: rgba(217,83,79,.12); }
   .pill.unknown { color: var(--muted); background: rgba(162,150,124,.12); }
   .pill.warn { color: var(--warn); background: rgba(227,169,60,.12); margin-left: .4rem; }
+  /* interrupteur "rocker" pupitre : suit le meme langage que .pill/.lamp (carre, voyant) */
+  .aswitch { display: inline-flex; align-items: center; gap: .45rem; cursor: pointer; user-select: none; background: none; border: none; padding: 0; margin-left: .5rem; font-family: var(--font-sans); }
+  .aswitch-track { width: 30px; height: 16px; background: var(--bg); border: 1px solid var(--border); position: relative; flex: none; transition: border-color 150ms ease, background 150ms ease; }
+  .aswitch-knob { position: absolute; top: 1px; left: 1px; width: 12px; height: 12px; background: var(--muted); transition: transform 150ms ease, background 150ms ease; }
+  .aswitch.on .aswitch-track { border-color: var(--accent); background: rgba(232,98,44,.14); }
+  .aswitch.on .aswitch-knob { transform: translateX(14px); background: var(--accent); box-shadow: 0 0 6px rgba(232,98,44,.65); }
+  .aswitch-label { font-size: .68rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .aswitch.on .aswitch-label { color: var(--text); }
+  .aswitch:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 3px; }
+  @media (prefers-reduced-motion: reduce) { .aswitch-track, .aswitch-knob { transition: none; } }
   .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .datarow { display: flex; justify-content: space-between; font-size: .8rem; font-family: var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
   .datarow span:last-child { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
@@ -309,9 +319,6 @@
   .config-form label { display: flex; flex-direction: column; gap: .2rem; font-size: .72rem; color: var(--muted); }
   .config-form input, .config-form select { font-family: var(--font-mono); font-size: .78rem; padding: .35rem .5rem; background: var(--bg); border: 1px solid var(--border); border-radius: 0; color: var(--text); }
   .config-form-actions { display: flex; gap: .5rem; margin-top: .3rem; }
-  .config-form label.config-checkbox { flex-direction: row; align-items: center; flex-wrap: wrap; gap: .4rem; font-size: .78rem; color: var(--text); }
-  .config-form label.config-checkbox input { width: auto; }
-  .config-form .config-hint { flex-basis: 100%; font-size: .68rem; color: var(--muted); }
   .config-saved-banner { font-size: .72rem; color: var(--good); padding: .3rem 0; }
 
   .mods-recent { display: flex; flex-direction: column; gap: .25rem; }
