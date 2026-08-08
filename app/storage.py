@@ -184,6 +184,13 @@ class Store:
                             "author": o.get("author"),
                             "at": datetime.now(UTC).isoformat(),
                         }
+                        # etat desire = "running" : distingue un arret volontaire d'un
+                        # crash pour l'auto-reboot (app/crash_recovery.py), qui ne doit
+                        # jamais annuler un `stop` admin juste parce que le process est
+                        # tombe comme prevu.
+                        data.setdefault("servers_desired_state", {})[o["server"]] = "running"
+                    if status == "done" and o["type"] == "stop":
+                        data.setdefault("servers_desired_state", {})[o["server"]] = "stopped"
                     self._dump(data)
                     return o
             return None
@@ -220,6 +227,39 @@ class Store:
             data = self._load()
             data.setdefault("game_auto", {})[name] = datetime.now(UTC).isoformat()
             self._dump(data)
+
+    async def get_crash_recovery(self, name: str) -> dict:
+        """Historique des tentatives d'auto-redemarrage sur crash pour ce serveur :
+        {"attempts": [iso...], "breaker_tripped_at": iso|None, "up_streak": int}.
+        up_streak = nb de polls consecutifs process_up=True vus (cf.
+        app/crash_recovery.py : un seul poll up ne suffit pas a effacer
+        l'historique, un crash-loop qui remonte brievement entre deux crashs ne
+        doit pas desarmer le disjoncteur). Absent = jamais declenche."""
+        async with self._lock:
+            return self._load().get("crash_recovery", {}).get(
+                name, {"attempts": [], "breaker_tripped_at": None, "up_streak": 0})
+
+    async def set_crash_recovery(self, name: str, attempts: list[str],
+                                 breaker_tripped_at: str | None, up_streak: int = 0) -> None:
+        async with self._lock:
+            data = self._load()
+            data.setdefault("crash_recovery", {})[name] = {
+                "attempts": attempts, "breaker_tripped_at": breaker_tripped_at,
+                "up_streak": up_streak}
+            self._dump(data)
+
+    async def clear_crash_recovery(self, name: str) -> None:
+        """Appele quand l'uptime est CONFIRME stable (plusieurs polls consecutifs
+        process_up=True) : l'episode de crash est termine, l'historique ne doit pas
+        peser sur le prochain."""
+        async with self._lock:
+            data = self._load()
+            existing = data.get("crash_recovery", {}).get(name)
+            if existing and (existing.get("attempts") or existing.get("breaker_tripped_at")
+                             or existing.get("up_streak")):
+                data.setdefault("crash_recovery", {})[name] = {
+                    "attempts": [], "breaker_tripped_at": None, "up_streak": 0}
+                self._dump(data)
 
     async def snapshot(self) -> dict:
         async with self._lock:

@@ -49,6 +49,9 @@ async def list_servers(request: Request):
             # "0 joueur" de l'auto-update ne peut jamais etre verifiee -> la MAJ
             # auto n'aura jamais lieu, seul le bouton manuel fonctionne.
             "auto_update_blocked": bool(update_available) and (state or {}).get("players") is None,
+            "auto_restart_on_crash": bool(cfg.get("auto_restart_on_crash")),
+            "crash_recovery_breaker_tripped": bool(
+                snap.get("crash_recovery", {}).get(name, {}).get("breaker_tripped_at")),
         }
         if user["role"] == "admin":
             # qui a lance le process courant (dernier start/restart/update abouti)
@@ -330,6 +333,7 @@ class RegistryUpdate(BaseModel):
     save_dir: str | None = Field(default=None, max_length=260)
     stop_warn_seconds: int | None = Field(default=None, ge=0, le=600)
     kuma_maj_push: str | None = Field(default=None, max_length=300)
+    auto_restart_on_crash: bool | None = None
 
 
 def _masked_registry_entry(entry: dict) -> dict:

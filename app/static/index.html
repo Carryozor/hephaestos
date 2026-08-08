@@ -77,6 +77,7 @@
   .pill.up { color: var(--good); background: rgba(140,191,110,.12); }
   .pill.down { color: var(--bad); background: rgba(217,83,79,.12); }
   .pill.unknown { color: var(--muted); background: rgba(162,150,124,.12); }
+  .pill.warn { color: var(--warn); background: rgba(227,169,60,.12); margin-left: .4rem; }
   .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .datarow { display: flex; justify-content: space-between; font-size: .8rem; font-family: var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
   .datarow span:last-child { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
@@ -308,6 +309,9 @@
   .config-form label { display: flex; flex-direction: column; gap: .2rem; font-size: .72rem; color: var(--muted); }
   .config-form input, .config-form select { font-family: var(--font-mono); font-size: .78rem; padding: .35rem .5rem; background: var(--bg); border: 1px solid var(--border); border-radius: 0; color: var(--text); }
   .config-form-actions { display: flex; gap: .5rem; margin-top: .3rem; }
+  .config-form label.config-checkbox { flex-direction: row; align-items: center; flex-wrap: wrap; gap: .4rem; font-size: .78rem; color: var(--text); }
+  .config-form label.config-checkbox input { width: auto; }
+  .config-form .config-hint { flex-basis: 100%; font-size: .68rem; color: var(--muted); }
   .config-saved-banner { font-size: .72rem; color: var(--good); padding: .3rem 0; }
 
   .mods-recent { display: flex; flex-direction: column; gap: .25rem; }

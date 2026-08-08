@@ -901,6 +901,7 @@ function configReadHtml(reg) {
     ["port de requête", reg.query_port],
     ["dossier de sauvegarde", reg.save_dir],
     ["délai d'avertissement (s)", reg.stop_warn_seconds],
+    ["auto-reboot sur crash", reg.auto_restart_on_crash ? "activé" : "désactivé"],
   ];
   const rowsHtml = rows.map(([label, val]) =>
     `<div class="detail-row"><span>${esc(label)}</span><span>${val != null && val !== "" ? esc(val) : "—"}</span></div>`
@@ -930,6 +931,9 @@ function configFormHtml(name, reg) {
     <label>port de requête <input type="number" id="cfg-query_port-${n}" value="${reg.query_port != null ? esc(reg.query_port) : ""}"></label>
     <label>dossier de sauvegarde <input type="text" id="cfg-save_dir-${n}" value="${esc(reg.save_dir || "")}"></label>
     <label>délai d'avertissement (s) <input type="number" id="cfg-stop_warn_seconds-${n}" value="${reg.stop_warn_seconds != null ? esc(reg.stop_warn_seconds) : ""}"></label>
+    <label class="config-checkbox"><input type="checkbox" id="cfg-auto_restart_on_crash-${n}" ${reg.auto_restart_on_crash ? "checked" : ""}> auto-reboot sur crash
+      <span class="config-hint">redémarre automatiquement si le process disparaît de façon inattendue (max 3 tentatives / heure, sinon alerte et abandon)</span>
+    </label>
     <div class="config-form-actions">
       <button type="button" class="save-btn" onclick="saveServerConfig('${n}')">enregistrer</button>
       <button type="button" class="save-btn" onclick="cancelServerConfig('${n}')">annuler</button>
@@ -1000,6 +1004,13 @@ async function saveServerConfig(name) {
     const before = loaded[key] != null ? String(loaded[key]) : "";
     if (raw !== before) body[key] = raw === "" ? null : Number(raw);
   };
+  const boolField = (key) => {
+    const el = document.getElementById(`cfg-${key}-${name}`);
+    if (!el) return;
+    const cur = el.checked;
+    const before = !!loaded[key];
+    if (cur !== before) body[key] = cur;
+  };
 
   strField("status");
   strField("process");
@@ -1009,6 +1020,7 @@ async function saveServerConfig(name) {
   numField("query_port");
   strField("save_dir");
   numField("stop_warn_seconds");
+  boolField("auto_restart_on_crash");
 
   const rconLoaded = loaded.rcon || {};
   const rHost = val(`cfg-rcon_host-${name}`).trim();
@@ -1060,7 +1072,10 @@ function renderDetailChrome(s) {
   const up = s.state ? s.state.process_up : null;
   const statusClass = up === true ? "up" : up === false ? "down" : "unknown";
   const statusText = up === true ? "up" : up === false ? "down" : "inconnu";
-  detailStatus.innerHTML = `<span class="pill ${statusClass}"><span class="dot"></span>${esc(statusText)}</span>`;
+  const breakerBadge = s.crash_recovery_breaker_tripped
+    ? `<span class="pill warn" title="auto-reboot abandonné après 3 tentatives en 1h — redémarrage manuel requis">auto-reboot en pause</span>`
+    : "";
+  detailStatus.innerHTML = `<span class="pill ${statusClass}"><span class="dot"></span>${esc(statusText)}</span>${breakerBadge}`;
   detailActions.innerHTML = "";
   for (const btn of buildActionButtons(s)) detailActions.appendChild(btn);
 }

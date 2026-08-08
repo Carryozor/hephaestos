@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from app.auth import require_agent
+from app.crash_recovery import auto_enqueue_crash_restarts
 from app.game_updates import auto_enqueue_game_updates
 from app.mods import auto_enqueue_mod_updates
 
@@ -80,6 +81,7 @@ class StateReport(BaseModel):
 async def get_orders(request: Request):
     await auto_enqueue_mod_updates(request)
     await auto_enqueue_game_updates(request)
+    await auto_enqueue_crash_restarts(request)
     store = request.app.state.store
     orders = await store.pending_orders()  # groom : peut expirer des ordres > 24h
     expired = await store.pop_expired_unnotified()
