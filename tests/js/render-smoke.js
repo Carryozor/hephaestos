@@ -157,6 +157,25 @@ if (chromeHtml.includes("aswitch")) {
 }
 vm.runInContext(`currentUser = { username: "boss", role: "admin", servers: [] };`, sandbox);
 
+// --- ligne du dashboard : meme interrupteur, admin only, dans row-actions ---
+// (embarque directement dans card.innerHTML, pas ajoute via querySelector+appendChild
+// -- le stub querySelector() ci-dessus renvoie toujours un div neuf deconnecte, donc
+// seul ce qui est present dans le template initial est inspectable ici)
+const rowOn = vm.runInContext("renderCard", sandbox)({ ...sampleServer, auto_restart_on_crash: true });
+if (!rowOn.innerHTML.includes('class="aswitch on"')) {
+  console.error("ligne dashboard : interrupteur auto-reboot absent ou inactif (etat on)"); process.exit(1);
+}
+const rowOff = vm.runInContext("renderCard", sandbox)({ ...sampleServer, auto_restart_on_crash: false });
+if (!rowOff.innerHTML.includes('class="aswitch"') || rowOff.innerHTML.includes('class="aswitch on"')) {
+  console.error("ligne dashboard : interrupteur auto-reboot absent ou faussement actif (etat off)"); process.exit(1);
+}
+vm.runInContext(`currentUser = { username: "gardien", role: "user", servers: ["palworld"] };`, sandbox);
+const rowUser = vm.runInContext("renderCard", sandbox)({ ...sampleServer, auto_restart_on_crash: true });
+if (rowUser.innerHTML.includes("aswitch")) {
+  console.error("ligne dashboard : interrupteur auto-reboot visible pour un compte non-admin"); process.exit(1);
+}
+vm.runInContext(`currentUser = { username: "boss", role: "admin", servers: [] };`, sandbox);
+
 // --- mods : chip d'etat unique + bouton "mettre a jour" ---
 const updServer = {
   name: "palworld", workshop_appid: 1623730, mods_restart_required: false,

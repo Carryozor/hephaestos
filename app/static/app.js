@@ -312,6 +312,12 @@ function renderCard(s) {
           : " — en cours")
       ).join("<br>")}</div>`
     : "";
+  // Meme interrupteur que le chrome de la vue detail (renderAutoRebootToggle), pour
+  // ne pas obliger a ouvrir chaque serveur juste pour armer/desarmer l'auto-reboot.
+  // Admin only : memes gardes que dans renderDetailChrome (PUT registry = 403 sinon).
+  const autoRebootToggle = (currentUser && currentUser.role === "admin")
+    ? renderAutoRebootToggle(s)
+    : "";
 
   const card = document.createElement("div");
   card.className = "srow";
@@ -321,7 +327,7 @@ function renderCard(s) {
     <div class="datarow${clickablePlayers ? " clickable" : ""} mono"${clickablePlayers ? ` onclick="togglePlayers('${esc(s.name)}')"` : ""}><span>${esc(players)}</span></div>
     <div class="mono">${versionCell}</div>
     <div class="mono">${esc(lastSeen)}</div>
-    <div class="row-actions"></div>
+    <div class="row-actions">${autoRebootToggle}</div>
     ${updateFlag}
     ${autoUpdateBlockedFlag}
     <div class="players-detail" id="players-detail-${esc(s.name)}"></div>
@@ -1095,10 +1101,12 @@ async function toggleAutoRestartOnCrash(name, next) {
       return;
     }
     // Reflete tout de suite sans attendre le prochain poll (10 s) : latestServers est
-    // la source lue par renderDetailFromLatest a chaque passage.
+    // la source lue par renderGrid/renderDetailFromLatest -- renderGrid() rafraichit
+    // la ligne du dashboard ET (via renderDetailFromLatest) le chrome de la vue
+    // detail si elle est ouverte, comme le fait deja le cycle de poll normal.
     const s = latestServers.find(x => x.name === name);
     if (s) s.auto_restart_on_crash = next;
-    if (detailServerName === name) renderDetailChrome(s || { name, auto_restart_on_crash: next });
+    renderGrid();
     showError("");
   } catch (e) {
     showError(String(e.message || e));
