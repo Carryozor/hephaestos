@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import (
     __version__,
+    metrics,
     routes_admin,
     routes_agent,
     routes_auth,
@@ -41,6 +42,7 @@ def create_app(settings: Settings, http_client: httpx.AsyncClient | None = None)
     app.include_router(routes_auth.router)
     app.include_router(routes_users.router)
     app.include_router(routes_setup.router)
+    app.include_router(metrics.router)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/api/health")
