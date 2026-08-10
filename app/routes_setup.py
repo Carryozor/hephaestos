@@ -39,16 +39,14 @@ async def setup_needed(request: Request) -> dict:
 
 @router.post("", status_code=201)
 async def setup(request: Request, response: Response, body: SetupRequest) -> dict:
-    if await _users_exist(request):
-        raise HTTPException(409, "configuration déjà effectuée : un compte existe déjà")
-
     store = request.app.state.store
     password_hash = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()
     try:
-        await store.create_user(body.username, password_hash, role="admin")
+        await store.create_first_admin(body.username, password_hash)
     except ValueError:
-        # course improbable (deux POST setup simultanés) : le second perd, le premier
-        # admin est déjà en place — même issue métier qu'un 409.
+        # course sur deux POST /api/setup simultanés, y compris avec des usernames
+        # DIFFERENTS : create_first_admin fait le check + l'insertion sous le même
+        # verrou, un seul des deux aboutit — même issue métier qu'un 409 normal.
         raise HTTPException(409, "configuration déjà effectuée : un compte existe déjà") from None
 
     token = await store.create_session(body.username, ttl_days=SESSION_TTL_DAYS)

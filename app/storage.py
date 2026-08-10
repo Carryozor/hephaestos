@@ -272,6 +272,22 @@ class Store:
         return {"username": username, "role": record.get("role", "admin"),
                 "servers": record.get("servers", []), **record}
 
+    async def create_first_admin(self, username: str, password_hash: str) -> None:
+        """Cree le tout premier compte (admin), de facon atomique : le check "aucun
+        compte n'existe encore" et l'insertion partagent LE MEME verrou. Contrairement
+        a create_user (qui ne rejette que la collision de meme username), leve
+        ValueError des qu'un compte quelconque existe deja -- sans ca, deux
+        POST /api/setup concurrents avec des usernames DIFFERENTS composeraient
+        chacun leur propre lecture+ecriture et pourraient tous les deux aboutir,
+        glissant un second admin invisible dans la fenetre de premier demarrage."""
+        async with self._lock:
+            data = self._load()
+            if data.get("users"):
+                raise ValueError("un compte existe deja")
+            data["users"] = {username: {"password_hash": password_hash, "role": "admin",
+                                        "servers": [], "created": datetime.now(UTC).isoformat()}}
+            self._dump(data)
+
     async def create_user(self, username: str, password_hash: str,
                           role: str = "admin", servers: list[str] | None = None) -> None:
         if role not in ("admin", "user"):
