@@ -41,6 +41,28 @@ def test_start_stop_orders_created_then_conflict(tmp_path):
     assert c.post("/api/servers/palworld/start").status_code == 409
     assert c.post("/api/servers/palworld/stop").status_code == 201
 
+
+async def test_concurrent_restart_requests_only_one_order_created(tmp_path):
+    """Double-clic admin / deux onglets : deux POST /restart concurrents sur le meme
+    serveur ne doivent creer qu'UN SEUL ordre (Store.add_order verifie et insere
+    desormais sous le meme verrou, cf. OrderConflict)."""
+    app = make_app(tmp_path)
+    password_hash = bcrypt.hashpw(b"testpass123", bcrypt.gensalt()).decode()
+    await app.state.store.create_user("tester", password_hash)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        login = await client.post("/api/login", json={"username": "tester", "password": "testpass123"})
+        assert login.status_code == 200
+        r1, r2 = await asyncio.gather(
+            client.post("/api/servers/palworld/restart"),
+            client.post("/api/servers/palworld/restart"),
+        )
+
+    assert sorted([r1.status_code, r2.status_code]) == [201, 409]
+    pending = await app.state.store.pending_orders()
+    assert len([o for o in pending if o["type"] == "restart"]) == 1
+
 def test_unknown_server_404_and_auth(tmp_path):
     c = make_client(tmp_path)
     assert c.post("/api/servers/doom/update").status_code == 404

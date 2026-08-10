@@ -4,7 +4,33 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.storage import Store
+from app.storage import OrderConflict, Store
+
+
+async def test_add_order_reject_if_blocks_second_matching_order(tmp_path):
+    s = Store(tmp_path / "s.json")
+    await s.add_order("palworld", "restart", reject_if=lambda o: True)
+    with pytest.raises(OrderConflict):
+        await s.add_order("palworld", "restart", reject_if=lambda o: True)
+    assert len(await s.pending_orders()) == 1
+
+
+async def test_add_order_reject_if_concurrent_calls_only_one_succeeds(tmp_path):
+    """Le check 'un ordre correspondant existe deja' et l'insertion doivent partager
+    le meme verrou : deux add_order() concurrents avec reject_if=True ne doivent
+    jamais tous les deux reussir, contrairement a l'ancien pattern
+    pending_orders() + add_order() compose en deux verrous separes."""
+    s = Store(tmp_path / "s.json")
+    results = await asyncio.gather(
+        s.add_order("palworld", "restart", reject_if=lambda o: True),
+        s.add_order("palworld", "restart", reject_if=lambda o: True),
+        return_exceptions=True,
+    )
+    successes = [r for r in results if not isinstance(r, Exception)]
+    conflicts = [r for r in results if isinstance(r, OrderConflict)]
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+    assert len(await s.pending_orders()) == 1
 
 
 async def test_add_and_pending(tmp_path):

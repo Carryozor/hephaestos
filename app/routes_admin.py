@@ -13,6 +13,7 @@ from app.steam_workshop import (
     get_workshop_item,
     search_workshop_items,
 )
+from app.storage import OrderConflict
 
 router = APIRouter(prefix="/api/servers", dependencies=[Depends(require_admin)])
 
@@ -75,9 +76,11 @@ async def _create_order(request: Request, name: str, type_: str):
     store = request.app.state.store
     if name not in await store.registry.all():
         raise HTTPException(404, "serveur inconnu")
-    if any(o["server"] == name and o["type"] == type_ for o in await store.pending_orders()):
-        raise HTTPException(409, f"ordre {type_} deja en attente")
-    return await store.add_order(name, type_, author=request.state.user["username"])
+    try:
+        return await store.add_order(name, type_, author=request.state.user["username"],
+                                     reject_if=lambda o: True)
+    except OrderConflict:
+        raise HTTPException(409, f"ordre {type_} deja en attente") from None
 
 
 @router.post("/{name}/update", status_code=201)
@@ -208,9 +211,11 @@ async def backup_save(request: Request, name: str):
     store = request.app.state.store
     if name not in await store.registry.all():
         raise HTTPException(404, "serveur inconnu")
-    if any(o["server"] == name and o["type"] == "backup" for o in await store.pending_orders()):
-        raise HTTPException(409, "backup deja en attente")
-    return await store.add_order(name, "backup", author=request.state.user["username"])
+    try:
+        return await store.add_order(name, "backup", author=request.state.user["username"],
+                                     reject_if=lambda o: True)
+    except OrderConflict:
+        raise HTTPException(409, "backup deja en attente") from None
 
 
 @router.post("/{name}/saves/restore", status_code=201)
@@ -226,10 +231,11 @@ async def restore_save(request: Request, name: str, body: RestoreSaveRequest):
     reported = {b.get("file") for b in (snap["servers"].get(name) or {}).get("save_backups") or []}
     if body.file not in reported:
         raise HTTPException(404, "backup inconnu de l'agent")
-    if any(o["server"] == name and o["type"] == "restore_save" for o in await store.pending_orders()):
-        raise HTTPException(409, "restauration deja en attente")
-    return await store.add_order(name, "restore_save", {"backup_file": body.file},
-                                 author=request.state.user["username"])
+    try:
+        return await store.add_order(name, "restore_save", {"backup_file": body.file},
+                                     author=request.state.user["username"], reject_if=lambda o: True)
+    except OrderConflict:
+        raise HTTPException(409, "restauration deja en attente") from None
 
 
 class ModPreviewRequest(BaseModel):
@@ -280,15 +286,15 @@ async def install_mod(request: Request, name: str, body: ModInstallRequest):
     # /mods/preview a deja ete appele juste avant.
     info = await _fetch_workshop_item(request, cfg["workshop_appid"], body.workshop_id)
 
-    if any(o["server"] == name and o["type"] == "install_mod" and o.get("workshop_id") == info["workshop_id"]
-           for o in await store.pending_orders()):
-        raise HTTPException(409, "installation deja en attente pour ce mod")
-
     await store.mods.set_mod_metadata(name, info["workshop_id"], info["title"], info["thumbnail_url"],
                                  steam_updated_at=mods.epoch_to_iso(info["time_updated"]))
-    return await store.add_order(name, "install_mod", {
-        "workshop_id": info["workshop_id"], "title": info["title"], "thumbnail_url": info["thumbnail_url"],
-    }, author=request.state.user["username"])
+    try:
+        return await store.add_order(name, "install_mod", {
+            "workshop_id": info["workshop_id"], "title": info["title"], "thumbnail_url": info["thumbnail_url"],
+        }, author=request.state.user["username"],
+            reject_if=lambda o: o.get("workshop_id") == info["workshop_id"])
+    except OrderConflict:
+        raise HTTPException(409, "installation deja en attente pour ce mod") from None
 
 
 @router.post("/{name}/mods/update-all")
@@ -303,13 +309,13 @@ async def remove_mod(request: Request, name: str, workshop_id: str):
     await _require_workshop_server(request, name)
     store = request.app.state.store
 
-    if any(o["server"] == name and o["type"] == "remove_mod" and o.get("workshop_id") == workshop_id
-           for o in await store.pending_orders()):
-        raise HTTPException(409, "suppression deja en attente pour ce mod")
-
     await store.mods.remove_mod_metadata_if_never_installed(name, workshop_id)
-    return await store.add_order(name, "remove_mod", {"workshop_id": workshop_id},
-                                 author=request.state.user["username"])
+    try:
+        return await store.add_order(name, "remove_mod", {"workshop_id": workshop_id},
+                                     author=request.state.user["username"],
+                                     reject_if=lambda o: o.get("workshop_id") == workshop_id)
+    except OrderConflict:
+        raise HTTPException(409, "suppression deja en attente pour ce mod") from None
 
 
 class RconUpdate(BaseModel):

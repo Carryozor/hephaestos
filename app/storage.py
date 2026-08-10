@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import secrets
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -13,6 +14,20 @@ ORDER_TYPES = {"update", "restart", "start", "stop", "install_mod", "remove_mod"
 ORDER_STATUSES = {"running", "done", "failed"}
 ORDER_TERMINAL_RETENTION_DAYS = 7
 ORDER_STALE_HOURS = 24
+
+
+class OrderConflict(Exception):
+    """Un ordre correspondant (meme server+type, et `reject_if` si fourni) est deja
+    pending/running -- leve par Store.add_order quand `reject_if` est fourni. Le
+    check et l'insertion partagent alors LE MEME verrou : un appelant qui composait
+    pending_orders() puis add_order() en deux appels separes laissait une fenetre ou
+    deux requetes concurrentes (double-clic admin, deux onglets) creaient chacune
+    l'ordre avant que l'une ou l'autre n'ait persiste quoi que ce soit."""
+
+    def __init__(self, existing: dict):
+        self.existing = existing
+        super().__init__(f"ordre {existing['type']} deja en attente pour {existing['server']}")
+
 
 class Store:
     def __init__(self, path: Path):
@@ -81,12 +96,21 @@ class Store:
         return changed
 
     async def add_order(self, server: str, type_: str, payload: dict | None = None,
-                        author: str | None = None) -> dict:
+                        author: str | None = None,
+                        reject_if: Callable[[dict], bool] | None = None) -> dict:
+        """`reject_if` (optionnel) recoit chaque ordre pending/running deja en file
+        pour ce (server, type) ; si l'un d'eux matche, leve OrderConflict AVANT
+        d'inserer -- sous le meme verrou que l'insertion (cf. OrderConflict)."""
         if type_ not in ORDER_TYPES:
             raise ValueError(f"type d'ordre invalide: {type_}")
         async with self._lock:
             data = self._load()
             self._groom_orders(data)
+            if reject_if is not None:
+                for o in data["orders"]:
+                    if (o["server"] == server and o["type"] == type_
+                            and o["status"] in ("pending", "running") and reject_if(o)):
+                        raise OrderConflict(o)
             # payload AVANT les champs internes : un payload contenant status/id/...
             # ne doit jamais pouvoir les ecraser (les payloads actuels sont construits
             # cote backend, mais l'invariant ne doit pas dependre de cette discipline)

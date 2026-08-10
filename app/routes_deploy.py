@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from app.auth import require_admin_role
 from app.known_servers import search_known
 from app.routes_admin import RconUpdate
+from app.storage import OrderConflict
 
 router = APIRouter(prefix="/api/deploy", dependencies=[Depends(require_admin_role)])
 
@@ -107,11 +108,11 @@ async def deploy_server(request: Request, body: DeployRequest):
                 body.name, body.display_name, body.server_appid, "installing")
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
-    if any(o["server"] == body.name and o["type"] == "install_game"
-           for o in await store.pending_orders()):
-        raise HTTPException(409, "installation déjà en attente")
-    order = await store.add_order(body.name, "install_game", {"appid": body.server_appid},
-                                  author=request.state.user["username"])
+    try:
+        order = await store.add_order(body.name, "install_game", {"appid": body.server_appid},
+                                      author=request.state.user["username"], reject_if=lambda o: True)
+    except OrderConflict:
+        raise HTTPException(409, "installation déjà en attente") from None
     return {"server": {"name": body.name, **entry}, "order": order}
 
 
@@ -169,9 +170,6 @@ async def setup_server(request: Request, name: str, body: SetupRequest):
         raise HTTPException(400, "exe_path absent des candidats scannés par l'agent")
     if body.stop_adapter == "rcon-generic" and (body.rcon is None or not body.rcon.password):
         raise HTTPException(400, "rcon-generic exige un bloc rcon avec password")
-    if any(o["server"] == name and o["type"] == "setup_server"
-           for o in await store.pending_orders()):
-        raise HTTPException(409, "finalisation déjà en attente")
 
     # Nom de process = basename de l'exe sans extension : meilleur défaut générique,
     # corrigeable ensuite via l'éditeur de registre (cas type Palworld où le process
@@ -188,8 +186,11 @@ async def setup_server(request: Request, name: str, body: SetupRequest):
         fields["rcon"] = {k: v for k, v in body.rcon.model_dump().items() if v is not None}
     await store.registry.update_entry(name, fields)
 
-    return await store.add_order(name, "setup_server", {
-        "appid": entry["server_appid"], "exe_path": body.exe_path,
-        "launch_args": body.launch_args or "", "task_name": name,
-        "process": process, "start_now": body.start_now,
-    }, author=request.state.user["username"])
+    try:
+        return await store.add_order(name, "setup_server", {
+            "appid": entry["server_appid"], "exe_path": body.exe_path,
+            "launch_args": body.launch_args or "", "task_name": name,
+            "process": process, "start_now": body.start_now,
+        }, author=request.state.user["username"], reject_if=lambda o: True)
+    except OrderConflict:
+        raise HTTPException(409, "finalisation déjà en attente") from None
