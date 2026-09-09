@@ -170,6 +170,15 @@ function Send-HephStateReport {
                 } catch {
                     Write-HephLog -LogPath $LogPath -Message "[$($serverCfg.name)] RCON Info echoue: $($_.Exception.Message)"
                 }
+                if (-not $rconInfo -and $serverCfg.PSObject.Properties.Name -contains "console_log_path" -and $serverCfg.console_log_path) {
+                    # Repli pour les jeux sans RCON ni A2S exploitable (ex. Valheim,
+                    # verifie le 09/09/2026) : resume tire du log console redirige.
+                    try {
+                        $rconInfo = Get-ValheimLogInfo -LogPath ([string]$serverCfg.console_log_path)
+                    } catch {
+                        Write-HephLog -LogPath $LogPath -Message "[$($serverCfg.name)] lecture log console echouee: $($_.Exception.Message)"
+                    }
+                }
                 try {
                     $metrics = Get-ProcessMetrics -ProcessName $serverCfg.process
                     $processCpuPercent = $metrics.CpuPercent

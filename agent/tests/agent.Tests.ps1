@@ -634,6 +634,92 @@ Describe "Invoke-HephAgentCycle -- comptage joueurs Windrose" {
     }
 }
 
+Describe "Invoke-HephAgentCycle -- rcon_info via log console (repli Valheim)" {
+    BeforeEach {
+        function New-TestCfgValheim {
+            param([string]$ConsoleLogPath = $null)
+
+            $server = [pscustomobject]@{
+                name         = "valheim"
+                appid        = 896660
+                process      = "valheim_server"
+                start_task   = "valheim"
+                stop_adapter = "generic-graceful"
+                query_port   = 2457
+            }
+            if ($ConsoleLogPath) {
+                $server | Add-Member -NotePropertyName console_log_path -NotePropertyValue $ConsoleLogPath
+            }
+
+            return [pscustomobject]@{
+                api_base           = "http://127.0.0.1:8710"
+                agent_token        = "tok"
+                kuma_agent_push    = "https://kuma/push/agent"
+                steamcmd           = "C:\steam\steamcmd.exe"
+                steamcmd_root      = $script:agentTestSteamRoot
+                auto_update_window = [pscustomobject]@{ start = "05:00"; end = "05:30" }
+                servers            = @($server)
+            }
+        }
+
+        Mock Get-LocalBuildId { "100" }
+        Mock Get-PublicBuildId { "100" }
+        Mock Get-Process { [pscustomobject]@{ Id = 1; StartTime = (Get-Date "2026-09-09 17:00") } }
+        Mock Get-A2sPlayerCount { $null }
+        Mock Send-KumaPush {}
+        $script:apiCallsValheim = @()
+        Mock Invoke-HephApi {
+            $script:apiCallsValheim += [pscustomobject]@{ Method = $Method; Path = $Path; Body = $Body }
+            if ($Path -eq "/api/agent/orders") { return [pscustomobject]@{ orders = @() } }
+            return [pscustomobject]@{ ok = $true }
+        }
+    }
+
+    It "console_log_path configure et process up : appelle Get-ValheimLogInfo et range le resultat dans rcon_info" {
+        $cfg = New-TestCfgValheim -ConsoleLogPath "C:\steam\ssc-backups\valheim-console.log"
+        Mock Get-ValheimLogInfo { "Valheim 1.0.7 (network 39) - 2 connexions vue(s) depuis le demarrage" }
+
+        Invoke-HephAgentCycle -Cfg $cfg -Now (Get-Date "2026-09-09 17:05") -LogPath (Join-Path $TestDrive "agent-valheim.log")
+
+        Should -Invoke Get-ValheimLogInfo -Times 1 -ParameterFilter { $LogPath -eq "C:\steam\ssc-backups\valheim-console.log" }
+        $stateCall = $script:apiCallsValheim | Where-Object { $_.Path -eq "/api/agent/state" }
+        $stateCall.Body.servers.valheim.rcon_info | Should -Be "Valheim 1.0.7 (network 39) - 2 connexions vue(s) depuis le demarrage"
+    }
+
+    It "sans console_log_path (autres jeux) : Get-ValheimLogInfo n'est jamais appele, pas de regression" {
+        $cfg = New-TestCfgValheim
+        Mock Get-ValheimLogInfo { "ne devrait jamais s'executer" }
+
+        Invoke-HephAgentCycle -Cfg $cfg -Now (Get-Date "2026-09-09 17:05") -LogPath (Join-Path $TestDrive "agent-valheim.log")
+
+        Should -Invoke Get-ValheimLogInfo -Times 0
+        $stateCall = $script:apiCallsValheim | Where-Object { $_.Path -eq "/api/agent/state" }
+        $stateCall.Body.servers.valheim.rcon_info | Should -Be $null
+    }
+
+    It "console_log_path configure mais Get-ValheimLogInfo renvoie `$null (log pas encore reconnaissable) : rcon_info reste `$null, pas d'exception" {
+        $cfg = New-TestCfgValheim -ConsoleLogPath "C:\steam\ssc-backups\valheim-console.log"
+        Mock Get-ValheimLogInfo { $null }
+
+        { Invoke-HephAgentCycle -Cfg $cfg -Now (Get-Date "2026-09-09 17:05") -LogPath (Join-Path $TestDrive "agent-valheim.log") } | Should -Not -Throw
+
+        $stateCall = $script:apiCallsValheim | Where-Object { $_.Path -eq "/api/agent/state" }
+        $stateCall.Body.servers.valheim.rcon_info | Should -Be $null
+    }
+
+    It "exception levee par Get-ValheimLogInfo : capturee, le cycle continue (etat + kuma s'executent quand meme)" {
+        $cfg = New-TestCfgValheim -ConsoleLogPath "C:\steam\ssc-backups\valheim-console.log"
+        Mock Get-ValheimLogInfo { throw "fichier verrouille" }
+
+        { Invoke-HephAgentCycle -Cfg $cfg -Now (Get-Date "2026-09-09 17:05") -LogPath (Join-Path $TestDrive "agent-valheim.log") } | Should -Not -Throw
+
+        $stateCall = $script:apiCallsValheim | Where-Object { $_.Path -eq "/api/agent/state" }
+        $stateCall.Count | Should -Be 1
+        $stateCall.Body.servers.valheim.rcon_info | Should -Be $null
+        Should -Invoke Send-KumaPush -Times 1 -ParameterFilter { $PushUrl -eq "https://kuma/push/agent" }
+    }
+}
+
 Describe "Invoke-HephAgentCycle -- ordres mods" {
     BeforeEach {
         $script:cfgMods = New-TestCfg

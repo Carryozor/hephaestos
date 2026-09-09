@@ -961,6 +961,64 @@ function Get-PalworldPlayers {
     return [pscustomobject]@{ Count = $players.Count; Players = $players }
 }
 
+function Get-ValheimLogInfo {
+    <#
+    .SYNOPSIS
+        Resume texte libre (destine a rcon_info) construit depuis le log console
+        Valheim redirige par le wrapper run-valheim.bat -- Valheim n'a ni RCON ni
+        responder A2S exploitable (verifie empiriquement le 09/09/2026 : timeout meme
+        en local sur le process reel), c'est la seule source d'info disponible.
+    .NOTES
+        Ne compte QUE les connexions distinctes VUES depuis le debut du fichier de log
+        (qui est tronque a chaque demarrage par le wrapper, donc "depuis le demarrage
+        du serveur") -- volontairement PAS un compteur de joueurs actuellement en ligne :
+        aucune ligne de deconnexion fiable n'a ete identifiee dans les logs Valheim, un
+        compteur "en ligne" ne pourrait donc que grandir et mentirait des qu'un joueur
+        part. Le marqueur de jonction ("Got character ZDOID from <steamid>") est deduit
+        de la documentation communautaire, PAS verifie contre une vraie connexion reelle
+        depuis cet environnement (aucun client Valheim disponible ici) -- a confirmer a la
+        premiere connexion reelle.
+
+        Retourne $null si le fichier est absent/illisible ou si aucune ligne de version
+        Valheim reconnue n'y figure (jamais d'exception : source moins fiable qu'un appel
+        RCON direct, le fichier peut etre en cours d'ecriture ou tronque a l'instant T).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$LogPath,
+
+        [int]$TailLines = 500
+    )
+
+    try {
+        if (-not (Test-Path -LiteralPath $LogPath)) {
+            return $null
+        }
+        $lines = @(Get-Content -LiteralPath $LogPath -Tail $TailLines -ErrorAction SilentlyContinue)
+        if (-not $lines -or $lines.Count -eq 0) {
+            return $null
+        }
+
+        $versionMatch = $lines | Select-String -Pattern "Console: Valheim ([\d.]+) \(network version (\d+)\)" | Select-Object -Last 1
+        if (-not $versionMatch) {
+            return $null
+        }
+        $version = $versionMatch.Matches[0].Groups[1].Value
+        $network = $versionMatch.Matches[0].Groups[2].Value
+
+        $steamIds = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($match in ($lines | Select-String -Pattern "Got character ZDOID from (\d+)")) {
+            [void]$steamIds.Add($match.Matches[0].Groups[1].Value)
+        }
+
+        $count = $steamIds.Count
+        $label = if ($count -le 1) { "connexion" } else { "connexions" }
+        return "Valheim $version (network $network) - $count $label vue(s) depuis le demarrage"
+    } catch {
+        return $null
+    }
+}
+
 function Get-ServerRconInfo {
     <#
     .SYNOPSIS
