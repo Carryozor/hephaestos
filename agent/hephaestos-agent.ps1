@@ -170,15 +170,6 @@ function Send-HephStateReport {
                 } catch {
                     Write-HephLog -LogPath $LogPath -Message "[$($serverCfg.name)] RCON Info echoue: $($_.Exception.Message)"
                 }
-                if (-not $rconInfo -and $serverCfg.PSObject.Properties.Name -contains "console_log_path" -and $serverCfg.console_log_path) {
-                    # Repli pour les jeux sans RCON ni A2S exploitable (ex. Valheim,
-                    # verifie le 09/09/2026) : resume tire du log console redirige.
-                    try {
-                        $rconInfo = Get-ValheimLogInfo -LogPath ([string]$serverCfg.console_log_path)
-                    } catch {
-                        Write-HephLog -LogPath $LogPath -Message "[$($serverCfg.name)] lecture log console echouee: $($_.Exception.Message)"
-                    }
-                }
                 try {
                     $metrics = Get-ProcessMetrics -ProcessName $serverCfg.process
                     $processCpuPercent = $metrics.CpuPercent
@@ -214,10 +205,30 @@ function Send-HephStateReport {
                 } catch {
                     Write-HephLog -LogPath $LogPath -Message "[$($serverCfg.name)] comptage joueurs echoue: $($_.Exception.Message)"
                 }
+            } elseif ($serverCfg.PSObject.Properties.Name -contains "console_log_path" -and $serverCfg.console_log_path) {
+                # Repli pour les jeux sans RCON ni A2S exploitable (ex. Valheim, verifie
+                # le 09/09/2026 -- Get-A2sPlayerCount timeout meme en local) : rcon_info
+                # + comptage tires du meme log console redirige, un seul appel pour les
+                # deux. Count = connexions VUES depuis le demarrage, pas "en ligne" (cf.
+                # doc Get-ValheimLogInfo) -- affiche quand meme dans la colonne joueurs
+                # du dashboard, choix explicite de l'utilisateur le 09/09/2026.
+                if ($processUp) {
+                    try {
+                        $logInfo = Get-ValheimLogInfo -LogPath ([string]$serverCfg.console_log_path)
+                        if (-not $rconInfo) { $rconInfo = $logInfo.Info }
+                        $players = $logInfo.Count
+                        if ($null -ne $logInfo.Count) {
+                            $playersList = @($logInfo.SteamIds | ForEach-Object {
+                                @{ id = $_; name = $_; steamid = $_ }
+                            })
+                        }
+                    } catch {
+                        Write-HephLog -LogPath $LogPath -Message "[$($serverCfg.name)] lecture log console echouee: $($_.Exception.Message)"
+                    }
+                }
             } elseif ($serverCfg.PSObject.Properties.Name -contains "query_port" -and $serverCfg.query_port) {
-                # A2S_INFO (jeux Source query, ex. Valheim : port de jeu + 1) : compte
-                # seul, pas de liste nominative. Ne compte que si le process est up
-                # (requete UDP inutile sinon).
+                # A2S_INFO (jeux Source query) : compte seul, pas de liste nominative.
+                # Ne compte que si le process est up (requete UDP inutile sinon).
                 if ($processUp) {
                     try {
                         $players = Get-A2sPlayerCount -HostName "127.0.0.1" -Port ([int]$serverCfg.query_port)

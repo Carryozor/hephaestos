@@ -964,45 +964,50 @@ function Get-PalworldPlayers {
 function Get-ValheimLogInfo {
     <#
     .SYNOPSIS
-        Resume texte libre (destine a rcon_info) construit depuis le log console
-        Valheim redirige par le wrapper run-valheim.bat -- Valheim n'a ni RCON ni
-        responder A2S exploitable (verifie empiriquement le 09/09/2026 : timeout meme
-        en local sur le process reel), c'est la seule source d'info disponible.
+        Resume texte + comptage construits depuis le log console Valheim redirige par
+        le wrapper run-valheim.bat -- Valheim n'a ni RCON ni responder A2S exploitable
+        (verifie empiriquement le 09/09/2026 : timeout meme en local sur le process
+        reel), c'est la seule source d'info disponible.
     .NOTES
-        Ne compte QUE les connexions distinctes VUES depuis le debut du fichier de log
-        (qui est tronque a chaque demarrage par le wrapper, donc "depuis le demarrage
-        du serveur") -- volontairement PAS un compteur de joueurs actuellement en ligne :
-        aucune ligne de deconnexion fiable n'a ete identifiee dans les logs Valheim, un
-        compteur "en ligne" ne pourrait donc que grandir et mentirait des qu'un joueur
-        part. Le marqueur de jonction ("Got character ZDOID from <steamid>") est deduit
-        de la documentation communautaire, PAS verifie contre une vraie connexion reelle
-        depuis cet environnement (aucun client Valheim disponible ici) -- a confirmer a la
-        premiere connexion reelle.
+        Retourne TOUJOURS un objet {Info, Count, SteamIds} (jamais $null lui-meme,
+        meme motif que Get-PalworldPlayers/Get-WindrosePlayers) : Info/Count valent
+        $null si le fichier est absent/illisible ou si aucune ligne de version Valheim
+        reconnue n'y figure (jamais d'exception : source moins fiable qu'un appel RCON
+        direct, le fichier peut etre en cours d'ecriture ou tronque a l'instant T).
 
-        Retourne $null si le fichier est absent/illisible ou si aucune ligne de version
-        Valheim reconnue n'y figure (jamais d'exception : source moins fiable qu'un appel
-        RCON direct, le fichier peut etre en cours d'ecriture ou tronque a l'instant T).
+        Count = connexions SteamID DISTINCTES VUES depuis le debut du fichier de log
+        (tronque a chaque demarrage par le wrapper, donc "depuis le demarrage du
+        serveur") -- volontairement PAS un compteur de joueurs actuellement en ligne :
+        choix accepte explicitement par l'utilisateur le 09/09/2026 pour l'afficher
+        quand meme dans la colonne "joueurs" du dashboard, sachant qu'aucune ligne de
+        deconnexion fiable n'a ete identifiee dans les logs Valheim -- le nombre ne peut
+        que grandir tant que le process ne redemarre pas. Le marqueur de jonction ("Got
+        character ZDOID from <steamid>") est deduit de la documentation communautaire,
+        PAS verifie contre une vraie connexion reelle depuis cet environnement (aucun
+        client Valheim disponible ici) -- a confirmer a la premiere connexion reelle.
 
         Scan du fichier ENTIER via Select-String -Path (streaming, pas de chargement
         integral en memoire) plutot qu'un -Tail borne : la ligne de version n'apparait
         qu'UNE FOIS au tout debut du log (au boot), donc un tail sur un serveur up depuis
-        plusieurs heures la fait sortir de la fenetre et Get-ValheimLogInfo retourne $null
-        en continu malgre un log valide -- bug reel constate le 09/09/2026 en prod
-        (rcon_info reste vide apres ~2h de fonctionnement).
+        plusieurs heures la fait sortir de la fenetre et l'ancienne version de cette
+        fonction retournait $null en continu malgre un log valide -- bug reel constate
+        le 09/09/2026 en prod (rcon_info restait vide apres ~2h de fonctionnement).
     #>
     param(
         [Parameter(Mandatory)]
         [string]$LogPath
     )
 
+    $empty = [pscustomobject]@{ Info = $null; Count = $null; SteamIds = @() }
+
     try {
         if (-not (Test-Path -LiteralPath $LogPath)) {
-            return $null
+            return $empty
         }
 
         $versionMatch = Select-String -LiteralPath $LogPath -Pattern "Console: Valheim ([\d.]+) \(network version (\d+)\)" | Select-Object -Last 1
         if (-not $versionMatch) {
-            return $null
+            return $empty
         }
         $version = $versionMatch.Matches[0].Groups[1].Value
         $network = $versionMatch.Matches[0].Groups[2].Value
@@ -1014,9 +1019,10 @@ function Get-ValheimLogInfo {
 
         $count = $steamIds.Count
         $label = if ($count -le 1) { "connexion" } else { "connexions" }
-        return "Valheim $version (network $network) - $count $label vue(s) depuis le demarrage"
+        $info = "Valheim $version (network $network) - $count $label vue(s) depuis le demarrage"
+        return [pscustomobject]@{ Info = $info; Count = $count; SteamIds = @($steamIds) }
     } catch {
-        return $null
+        return $empty
     }
 }
 
