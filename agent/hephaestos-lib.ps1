@@ -982,24 +982,25 @@ function Get-ValheimLogInfo {
         Retourne $null si le fichier est absent/illisible ou si aucune ligne de version
         Valheim reconnue n'y figure (jamais d'exception : source moins fiable qu'un appel
         RCON direct, le fichier peut etre en cours d'ecriture ou tronque a l'instant T).
+
+        Scan du fichier ENTIER via Select-String -Path (streaming, pas de chargement
+        integral en memoire) plutot qu'un -Tail borne : la ligne de version n'apparait
+        qu'UNE FOIS au tout debut du log (au boot), donc un tail sur un serveur up depuis
+        plusieurs heures la fait sortir de la fenetre et Get-ValheimLogInfo retourne $null
+        en continu malgre un log valide -- bug reel constate le 09/09/2026 en prod
+        (rcon_info reste vide apres ~2h de fonctionnement).
     #>
     param(
         [Parameter(Mandatory)]
-        [string]$LogPath,
-
-        [int]$TailLines = 500
+        [string]$LogPath
     )
 
     try {
         if (-not (Test-Path -LiteralPath $LogPath)) {
             return $null
         }
-        $lines = @(Get-Content -LiteralPath $LogPath -Tail $TailLines -ErrorAction SilentlyContinue)
-        if (-not $lines -or $lines.Count -eq 0) {
-            return $null
-        }
 
-        $versionMatch = $lines | Select-String -Pattern "Console: Valheim ([\d.]+) \(network version (\d+)\)" | Select-Object -Last 1
+        $versionMatch = Select-String -LiteralPath $LogPath -Pattern "Console: Valheim ([\d.]+) \(network version (\d+)\)" | Select-Object -Last 1
         if (-not $versionMatch) {
             return $null
         }
@@ -1007,7 +1008,7 @@ function Get-ValheimLogInfo {
         $network = $versionMatch.Matches[0].Groups[2].Value
 
         $steamIds = [System.Collections.Generic.HashSet[string]]::new()
-        foreach ($match in ($lines | Select-String -Pattern "Got character ZDOID from (\d+)")) {
+        foreach ($match in (Select-String -LiteralPath $LogPath -Pattern "Got character ZDOID from (\d+)")) {
             [void]$steamIds.Add($match.Matches[0].Groups[1].Value)
         }
 
