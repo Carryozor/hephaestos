@@ -8,9 +8,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from app.storage_bepinex import BepInExRepository
+
 ORDER_TYPES = {"update", "restart", "start", "stop", "install_mod", "remove_mod",
                "backup", "restore_save", "install_game", "scan_exe", "setup_server",
-               "list_files", "read_file", "write_file"}
+               "list_files", "read_file", "write_file", "update_bepinex_mods"}
 ORDER_STATUSES = {"running", "done", "failed"}
 ORDER_TERMINAL_RETENTION_DAYS = 7
 ORDER_STALE_HOURS = 24
@@ -38,6 +40,7 @@ class Store:
             self._dump({"servers": {}, "orders": [], "users": {}, "sessions": {}})
         self.mods = ModsRepository(self)
         self.registry = ServersRepository(self)
+        self.bepinex = BepInExRepository(self)
 
     def _load(self) -> dict:
         return json.loads(self._path.read_text())

@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app import bepinex as bepinex_service
 from app import mods
 from app.auth import require_admin, require_admin_role
 from app.steam_workshop import (
@@ -60,6 +61,9 @@ async def list_servers(request: Request):
         if "workshop_appid" in cfg:
             entry["workshop_appid"] = cfg["workshop_appid"]
             entry.update(await mods.build_mods_entry_fields(request, name, cfg, state))
+        bepinex_fields = await bepinex_service.build_bepinex_entry_fields(request, name)
+        if bepinex_fields:
+            entry.update(bepinex_fields)
         servers.append(entry)
     result = {"servers": servers}
     if user["role"] == "admin":

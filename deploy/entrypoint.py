@@ -26,7 +26,18 @@ def load_settings() -> Settings:
         raise SystemExit(f"servers.json invalide ({servers_file}): {e}") from e
     steam_api_key = os.environ.get("STEAM_API_KEY")
 
-    return Settings(agent_token=agent_token, data_dir=data_dir, servers=servers, steam_api_key=steam_api_key,
+    # Contrairement a servers.json, l'absence de ce fichier n'est PAS fatale : un
+    # jeu sans mods BepInEx suivis (Palworld, Windrose) n'en a simplement pas besoin.
+    bepinex_file = Path(os.environ.get("HEPHAESTOS_BEPINEX_FILE", "/data/bepinex-mods.json"))
+    bepinex_mods: dict = {}
+    if bepinex_file.exists():
+        try:
+            bepinex_mods = json.loads(bepinex_file.read_text())
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"bepinex-mods.json invalide ({bepinex_file}): {e}") from e
+
+    return Settings(agent_token=agent_token, data_dir=data_dir, servers=servers,
+                    bepinex_mods=bepinex_mods, steam_api_key=steam_api_key,
                     alert_webhook=os.environ.get("HEPHAESTOS_ALERT_WEBHOOK"))
 
 

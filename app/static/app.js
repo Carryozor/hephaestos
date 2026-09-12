@@ -18,6 +18,7 @@ let modalResolve = null;
 // openModsPanels (bandeau mods replie/deplie de la ligne serveur) suit le meme principe.
 let openPlayersDetail = new Set();
 let openModsPanels = new Set();
+let openBepinexPanels = new Set();
 let openFileEditor = null;  // {name, root, path, sha256} pendant l'edition, sinon null
 // files_listing/file_read ne sont renvoyes que par GET /detail, jamais par la liste
 // /api/servers (latestServers) -- dernier /detail charge, utilise par renderDetailFromLatest
@@ -105,6 +106,37 @@ function modUpdateState(m) {
   if (m.update_available) return { cls: "mod-needs-update", label: "maj disponible" };
   if (!m.installed_at) return { cls: "mod-unknown-date", label: "état inconnu — re-baser" };
   return { cls: "mod-uptodate", label: "à jour" };
+}
+
+function bepinexUpdateState(m) {
+  // Detection seule pour l'instant (pas de bouton "mettre a jour" : l'agent ne
+  // sait pas encore executer cet ordre, cf. docs/plans/2026-09-12-bepinex-mod-updates.md
+  // phase 5, pas encore livree).
+  if (m.last_error) return { cls: "mod-pending", label: "vérification en échec" };
+  if (m.update_available) return { cls: "mod-needs-update", label: "maj disponible" };
+  if (!m.latest_checked_at) return { cls: "mod-unknown-date", label: "pas encore vérifié" };
+  return { cls: "mod-uptodate", label: "à jour" };
+}
+
+function renderBepInExSummary(s) {
+  if (!("bepinex_mods" in s)) return "";
+  const mods = s.bepinex_mods || [];
+  const needsUpdate = mods.filter(m => m.update_available).length;
+  const modRows = mods.map(m => {
+    const st = bepinexUpdateState(m);
+    const versions = m.update_available
+      ? `${esc(m.installed_version || "—")} → ${esc(m.latest_version)}`
+      : esc(m.installed_version || "—");
+    return `
+    <div class="mod-row">
+      <span class="mod-title">${esc(m.title)}<span class="mod-dates">${versions}</span></span>
+      <span class="mod-status ${st.cls}">${st.label}</span>
+    </div>`;
+  }).join("");
+  return `
+    <div class="datarow"><span>mods BepInEx</span><span>${mods.length} suivis${needsUpdate ? ` · <span class="mods-needs-update">${needsUpdate} maj dispo</span>` : ""}</span></div>
+    <div class="mods-recent">${modRows}</div>
+  `;
 }
 
 function modLatestEvent(m) {
@@ -228,8 +260,10 @@ function renderAnnunciators(servers) {
     setAnnValue("annUpdatesValue", `${updatesCount} en attente${suffix}`);
   }
 
-  // Mods Workshop : somme des mods avec update_available sur tous les serveurs.
-  const modsCount = list.reduce((sum, s) => sum + (s.mods || []).filter(m => m.update_available).length, 0);
+  // Mods Workshop + BepInEx : somme des mods avec update_available sur tous les serveurs.
+  const modsCount = list.reduce((sum, s) =>
+    sum + (s.mods || []).filter(m => m.update_available).length
+        + (s.bepinex_mods || []).filter(m => m.update_available).length, 0);
   if (modsCount === 0) {
     setLamp("annModsLamp", "ok");
     setAnnValue("annModsValue", "à jour");
@@ -303,6 +337,23 @@ function renderCard(s) {
       <div class="mods-detail${isOpen ? " open" : ""}" id="mods-detail-${esc(s.name)}">${renderModsSummary(s)}</div>
     `;
   }
+  // Bande mods BepInEx (Valheim) : meme motif que la bande Workshop ci-dessus,
+  // toggle et Set separes (openBepinexPanels) -- pas de bouton d'action pour
+  // l'instant, detection seule (cf. bepinexUpdateState).
+  let bepinexBand = "";
+  if ("bepinex_mods" in s) {
+    const mods = s.bepinex_mods || [];
+    const needsUpdate = mods.filter(m => m.update_available).length;
+    const isOpen = openBepinexPanels.has(s.name);
+    const chevron = isOpen ? "▾" : "▸";
+    const updatePart = needsUpdate > 0
+      ? ` · <span class="mods-toggle-count">${needsUpdate} maj dispo</span>`
+      : "";
+    bepinexBand = `
+      <div class="datarow clickable mods-toggle bepinex-detail srow-band" onclick="toggleBepinex('${esc(s.name)}')"><span>${chevron}</span><span>mods BepInEx : ${mods.length} suivis${updatePart}</span></div>
+      <div class="mods-detail bepinex-detail${isOpen ? " open" : ""}" id="bepinex-detail-${esc(s.name)}">${renderBepInExSummary(s)}</div>
+    `;
+  }
   const queue = s.order_queue || [];
   const pendingText = queue.length
     ? `<div class="pending">${queue.map((o) =>
@@ -332,6 +383,7 @@ function renderCard(s) {
     ${autoUpdateBlockedFlag}
     <div class="players-detail" id="players-detail-${esc(s.name)}"></div>
     ${modsBand}
+    ${bepinexBand}
     ${pendingText}
     ${startedByLine}
   `;
@@ -716,6 +768,17 @@ function toggleMods(name) {
     if (el) el.classList.remove("open");
   } else {
     openModsPanels.add(name);
+    if (el) el.classList.add("open");
+  }
+}
+
+function toggleBepinex(name) {
+  const el = document.getElementById(`bepinex-detail-${name}`);
+  if (openBepinexPanels.has(name)) {
+    openBepinexPanels.delete(name);
+    if (el) el.classList.remove("open");
+  } else {
+    openBepinexPanels.add(name);
     if (el) el.classList.add("open");
   }
 }
@@ -1113,13 +1176,44 @@ async function toggleAutoRestartOnCrash(name, next) {
   }
 }
 
+function renderDetailBepInExSection(s) {
+  if (!("bepinex_mods" in s)) return "";
+  const mods = s.bepinex_mods || [];
+  const needsUpdate = mods.filter(m => m.update_available).length;
+  const rows = mods.map(m => {
+    const st = bepinexUpdateState(m);
+    const versions = m.update_available
+      ? `installé ${esc(m.installed_version || "—")} · disponible ${esc(m.latest_version)}`
+      : `installé ${esc(m.installed_version || "—")}`;
+    const errorLine = m.last_error ? `<span class="mod-dates">échec vérification : ${esc(m.last_error)}</span>` : "";
+    return `
+    <div class="mod-row">
+      <span class="mod-title">${esc(m.title)}<span class="mod-dates">${versions}</span>${errorLine}</span>
+      <span class="mod-status ${st.cls}">${st.label}</span>
+    </div>`;
+  }).join("");
+  // Pas de bouton "mettre a jour" : l'agent ne sait pas encore executer cette
+  // action (detection seule pour l'instant, cf. plan phase 5 non livree).
+  return `
+    <div class="detail-section">
+      <div class="mods-head"><h4>Mods BepInEx (${mods.length} suivis${needsUpdate ? ` · ${needsUpdate} maj dispo` : ""})</h4></div>
+      ${rows || `<div class="detail-empty">aucun mod suivi</div>`}
+    </div>`;
+}
+
 function renderDetailMods(s) {
-  if (!("workshop_appid" in s)) {
+  const hasWorkshop = "workshop_appid" in s;
+  const hasBepinex = "bepinex_mods" in s;
+  if (!hasWorkshop && !hasBepinex) {
     detailColumns.classList.add("single");
     detailMods.innerHTML = "";
     return;
   }
   detailColumns.classList.remove("single");
+  if (!hasWorkshop) {
+    detailMods.innerHTML = renderDetailBepInExSection(s);
+    return;
+  }
   const mods = s.mods || [];
   const restartBanner = s.mods_restart_required
     ? `<div class="mods-restart-banner">redémarrage requis pour appliquer les mods</div>`
@@ -1160,7 +1254,8 @@ function renderDetailMods(s) {
       </div>
       <span class="workshop-toggle" onclick="toggleWorkshopBrowser('${esc(s.name)}')">parcourir le Workshop</span>
       <div class="workshop-browser" id="workshop-browser-${esc(s.name)}"></div>
-    </div>`;
+    </div>
+    ${renderDetailBepInExSection(s)}`;
 }
 
 function simpleLineDiff(oldText, newText) {
@@ -1715,6 +1810,10 @@ function restoreOpenPanels() {
   // charge separement (comme players-detail), sur le meme principe que ci-dessus.
   for (const name of openModsPanels) {
     const el = document.getElementById(`mods-detail-${name}`);
+    if (el) el.classList.add("open");
+  }
+  for (const name of openBepinexPanels) {
+    const el = document.getElementById(`bepinex-detail-${name}`);
     if (el) el.classList.add("open");
   }
 }

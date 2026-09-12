@@ -1,0 +1,56 @@
+{
+  "valheim": [
+    {
+      "slug": "denikson/BepInExPack_Valheim",
+      "title": "BepInExPack Valheim",
+      "source": "thunderstore",
+      "owner": "denikson",
+      "package": "BepInExPack_Valheim",
+      "target": "root",
+      "installed_version": "5.4.2350",
+      "installed_paths": ["BepInEx/core", "winhttp.dll", "doorstop_config.ini"]
+    },
+    {
+      "slug": "Grantapher/ValheimPlus_Grantapher_Temporary",
+      "title": "Valheim Plus (Grantapher)",
+      "source": "thunderstore",
+      "owner": "Grantapher",
+      "package": "ValheimPlus_Grantapher_Temporary",
+      "target": "plugins",
+      "installed_version": "10.1.1",
+      "installed_paths": ["BepInEx/plugins/ValheimPlus.dll"]
+    },
+    {
+      "slug": "ValheimModding/Jotunn",
+      "title": "Jötunn",
+      "source": "thunderstore",
+      "owner": "ValheimModding",
+      "package": "Jotunn",
+      "target": "plugins",
+      "installed_version": "2.30.0",
+      "installed_paths": ["BepInEx/plugins/Jotunn.dll", "BepInEx/plugins/Jotunn.xml"]
+    },
+    {
+      "slug": "RandyKnapp/EquipmentAndQuickSlots",
+      "title": "Equipment and Quick Slots",
+      "source": "thunderstore",
+      "owner": "RandyKnapp",
+      "package": "EquipmentAndQuickSlots",
+      "target": "plugins",
+      "installed_version": "3.1.2",
+      "installed_paths": ["BepInEx/plugins/EquipmentAndQuickSlots.dll"]
+    },
+    {
+      "slug": "SpikeHimself/XPortal",
+      "title": "XPortal",
+      "source": "github_release",
+      "owner": "SpikeHimself",
+      "package": "XPortal",
+      "asset_pattern": "^XPortal-v.*\\.zip$",
+      "tag_prefix": "v",
+      "target": "plugins",
+      "installed_version": "1.2.25",
+      "installed_paths": ["BepInEx/plugins/XPortal"]
+    }
+  ]
+}

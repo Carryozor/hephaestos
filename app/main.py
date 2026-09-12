@@ -33,6 +33,7 @@ def create_app(settings: Settings, http_client: httpx.AsyncClient | None = None)
     app.state.settings = settings
     app.state.store = Store(settings.data_dir / "state.json")
     app.state.store.registry.seed_if_empty(settings.servers)
+    app.state.store.bepinex.seed_if_empty(settings.bepinex_mods)
     app.state.http_client = http_client or httpx.AsyncClient()
     app.state.steam = SteamBuildIds(app.state.http_client)
     app.include_router(routes_admin.router)

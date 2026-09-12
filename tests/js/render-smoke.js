@@ -625,5 +625,53 @@ vm.runInContext("openModsPanels.delete('modstoggle')", sandbox);
   if (!panelHtml.includes("image du jeu de base")) throw new Error("badge is_proxy absent");
   sandbox.renderDeployDetailPanel({ appid: 1, name: "Jeu Inconnu", header_image: null, description: null, is_proxy: false });
 
+  // --- mods BepInEx (Valheim, pas de workshop_appid) : detection seule, pas de bouton ---
+  if (sandbox.renderBepInExSummary({ name: "windrose" }) !== "") {
+    throw new Error("resume bepinex : doit etre vide sans bepinex_mods");
+  }
+  const bepinexServer = {
+    name: "valheim", display_name: "Valheim",
+    bepinex_mods: [
+      { slug: "a/b", title: "Jötunn", installed_version: "2.30.0", latest_version: "2.30.0",
+        latest_checked_at: "2026-09-12T00:00:00+00:00", last_error: null, update_available: false },
+      { slug: "c/d", title: "XPortal", installed_version: "1.2.25", latest_version: "1.2.26",
+        latest_checked_at: "2026-09-12T00:00:00+00:00", last_error: null, update_available: true },
+    ],
+  };
+  const bepinexSummaryHtml = sandbox.renderBepInExSummary(bepinexServer);
+  if (!bepinexSummaryHtml.includes("Jötunn") || !bepinexSummaryHtml.includes("XPortal")) {
+    throw new Error("resume bepinex : mods absents du rendu");
+  }
+  if (!bepinexSummaryHtml.includes("1 maj dispo")) {
+    throw new Error("resume bepinex : compteur maj dispo incorrect");
+  }
+
+  // carte : un serveur SANS workshop_appid mais AVEC bepinex_mods doit quand meme
+  // afficher la bande (le garde initial ne testait que workshop_appid, Valheim en
+  // aurait ete exclu).
+  const bepinexCardServer = {
+    ...sampleServer, name: "valheim", workshop_appid: undefined, mods: undefined,
+    bepinex_mods: bepinexServer.bepinex_mods,
+  };
+  delete bepinexCardServer.workshop_appid;
+  delete bepinexCardServer.mods;
+  const bepinexCard = vm.runInContext("renderCard", sandbox)(bepinexCardServer);
+  if (!bepinexCard.innerHTML.includes("mods BepInEx")) {
+    throw new Error("carte : bande bepinex absente pour un serveur sans workshop_appid");
+  }
+
+  // vue plein ecran : un serveur avec seulement bepinex_mods ne doit PAS rester en
+  // mode une colonne (detailColumns.classList.add("single") ne doit pas s'appliquer
+  // en pratique -- ici on verifie juste que le contenu bepinex est bien rendu).
+  sandbox.__bepinexServer = bepinexCardServer;
+  const bepinexDetailHtml = vm.runInContext(
+    "renderDetailMods(__bepinexServer); detailMods.innerHTML", sandbox);
+  if (!bepinexDetailHtml.includes("Jötunn") || !bepinexDetailHtml.includes("XPortal")) {
+    throw new Error("plein ecran : colonne bepinex incomplete pour un serveur sans workshop_appid");
+  }
+  if (bepinexDetailHtml.includes("mettre à jour")) {
+    throw new Error("plein ecran bepinex : bouton de mise a jour ne doit pas exister (phase 5 non livree)");
+  }
+
   console.log("SMOKE OK");
 })().catch(e => { console.error(e); process.exit(1); });

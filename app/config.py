@@ -7,5 +7,6 @@ class Settings:
     agent_token: str
     data_dir: Path
     servers: dict = field(default_factory=dict)  # name -> {display_name, server_appid}
+    bepinex_mods: dict = field(default_factory=dict)  # name -> [mod seed dicts], cf. storage_bepinex
     steam_api_key: str | None = None
     alert_webhook: str | None = None  # webhook Discord-compatible notifie sur ordre failed
