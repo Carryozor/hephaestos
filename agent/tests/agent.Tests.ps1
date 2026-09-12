@@ -454,7 +454,7 @@ Describe "Invoke-HephAgentCycle -- rapport d'etat enrichi et config backend (v2.
         Invoke-HephAgentCycle -Cfg $script:cfgCycle -ConfigPath $script:configPathCycle -Now (Get-Date "2026-07-18 12:00") -LogPath (Join-Path $TestDrive "cycle-enrichi.log")
 
         $stateCall = $script:apiCallsCycle | Where-Object { $_.Path -eq "/api/agent/state" } | Select-Object -First 1
-        $stateCall.Body.agent_version | Should -Be "2.2.0"
+        $stateCall.Body.agent_version | Should -Be "2.3.0"
         @($stateCall.Body.config_servers).Count | Should -Be 1
         $stateCall.Body.config_servers[0].name | Should -Be "palworld"
     }
@@ -793,6 +793,58 @@ Describe "Invoke-HephAgentCycle -- ordres mods" {
         $stateCall = $script:apiCallsMods | Where-Object { $_.Path -eq "/api/agent/state" }
         $stateCall.Body.servers.palworld.installed_mod_ids | Should -Contain "123"
         $stateCall.Body.servers.palworld.process_started_at | Should -Not -BeNullOrEmpty
+    }
+
+    It "traite un ordre update_bepinex_mods : appelle Update-BepInExMods une fois avec les mods, transmet bepinex_installed" {
+        $script:pendingOrderMods = [pscustomobject]@{
+            id = "o4"; server = "palworld"; type = "update_bepinex_mods"; status = "pending"
+            mods = @([pscustomobject]@{ slug = "ValheimModding/Jotunn"; package = "Jotunn"; version = "2.31.0"
+                download_url = "https://thunderstore.io/x.zip"; target = "plugins"
+                previous_paths = @("BepInEx/plugins/Jotunn.dll"); expected_plugin = "Jotunn" })
+        }
+        Mock Update-BepInExMods {
+            [pscustomobject]@{ ok = $true; detail = "mise a jour reussie"
+                bepinex_installed = @([pscustomobject]@{ slug = "ValheimModding/Jotunn"; version = "2.31.0"
+                    paths = @("BepInEx/plugins/Jotunn.dll") }) }
+        }
+
+        Invoke-HephAgentCycle -Cfg $script:cfgMods -Now (Get-Date "2026-07-13 12:00") -LogPath (Join-Path $TestDrive "agent-mods.log")
+
+        Should -Invoke Update-BepInExMods -Times 1 -ParameterFilter { $Mods.Count -eq 1 -and $Mods[0].slug -eq "ValheimModding/Jotunn" }
+        $orderCall = $script:apiCallsMods | Where-Object { $_.Path -eq "/api/agent/orders/o4" }
+        $orderCall[-1].Body.status | Should -Be "done"
+        $orderCall[-1].Body.bepinex_installed[0].slug | Should -Be "ValheimModding/Jotunn"
+        $orderCall[-1].Body.bepinex_installed[0].version | Should -Be "2.31.0"
+    }
+
+    It "Update-BepInExMods ok=false marque l'ordre failed avec le detail" {
+        $script:pendingOrderMods = [pscustomobject]@{
+            id = "o5"; server = "palworld"; type = "update_bepinex_mods"; status = "pending"
+            mods = @([pscustomobject]@{ slug = "a/b"; package = "b"; version = "1.0.0"
+                download_url = "https://thunderstore.io/x.zip"; target = "plugins" })
+        }
+        Mock Update-BepInExMods { [pscustomobject]@{ ok = $false; detail = "verification post-demarrage echouee" } }
+
+        Invoke-HephAgentCycle -Cfg $script:cfgMods -Now (Get-Date "2026-07-13 12:00") -LogPath (Join-Path $TestDrive "agent-mods.log")
+
+        $orderCall = $script:apiCallsMods | Where-Object { $_.Path -eq "/api/agent/orders/o5" }
+        $orderCall[-1].Body.status | Should -Be "failed"
+        $orderCall[-1].Body.detail | Should -Match "verification post-demarrage echouee"
+    }
+
+    It "une exception Update-BepInExMods marque l'ordre failed avec le message d'exception" {
+        $script:pendingOrderMods = [pscustomobject]@{
+            id = "o6"; server = "palworld"; type = "update_bepinex_mods"; status = "pending"
+            mods = @([pscustomobject]@{ slug = "a/b"; package = "b"; version = "1.0.0"
+                download_url = "https://thunderstore.io/x.zip"; target = "plugins" })
+        }
+        Mock Update-BepInExMods { throw "staging inaccessible" }
+
+        Invoke-HephAgentCycle -Cfg $script:cfgMods -Now (Get-Date "2026-07-13 12:00") -LogPath (Join-Path $TestDrive "agent-mods.log")
+
+        $orderCall = $script:apiCallsMods | Where-Object { $_.Path -eq "/api/agent/orders/o6" }
+        $orderCall[-1].Body.status | Should -Be "failed"
+        $orderCall[-1].Body.detail | Should -Match "staging inaccessible"
     }
 }
 

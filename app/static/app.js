@@ -109,9 +109,6 @@ function modUpdateState(m) {
 }
 
 function bepinexUpdateState(m) {
-  // Detection seule pour l'instant (pas de bouton "mettre a jour" : l'agent ne
-  // sait pas encore executer cet ordre, cf. docs/plans/2026-09-12-bepinex-mod-updates.md
-  // phase 5, pas encore livree).
   if (m.last_error) return { cls: "mod-pending", label: "vérification en échec" };
   if (m.update_available) return { cls: "mod-needs-update", label: "maj disponible" };
   if (!m.latest_checked_at) return { cls: "mod-unknown-date", label: "pas encore vérifié" };
@@ -1186,19 +1183,67 @@ function renderDetailBepInExSection(s) {
       ? `installé ${esc(m.installed_version || "—")} · disponible ${esc(m.latest_version)}`
       : `installé ${esc(m.installed_version || "—")}`;
     const errorLine = m.last_error ? `<span class="mod-dates">échec vérification : ${esc(m.last_error)}</span>` : "";
+    const updateBtn = m.update_available
+      ? `<button class="mod-update-btn" onclick="updateBepInExMods('${esc(s.name)}', ['${esc(m.slug)}'])">mettre à jour</button>`
+      : "";
     return `
     <div class="mod-row">
       <span class="mod-title">${esc(m.title)}<span class="mod-dates">${versions}</span>${errorLine}</span>
       <span class="mod-status ${st.cls}">${st.label}</span>
+      ${updateBtn}
     </div>`;
   }).join("");
-  // Pas de bouton "mettre a jour" : l'agent ne sait pas encore executer cette
-  // action (detection seule pour l'instant, cf. plan phase 5 non livree).
+  const updateAllBtn = needsUpdate > 1
+    ? `<button class="mod-update-btn mod-update-all" onclick="updateBepInExMods('${esc(s.name)}', null)">tout mettre à jour (${needsUpdate})</button>`
+    : "";
   return `
     <div class="detail-section">
-      <div class="mods-head"><h4>Mods BepInEx (${mods.length} suivis${needsUpdate ? ` · ${needsUpdate} maj dispo` : ""})</h4></div>
+      <div class="mods-head"><h4>Mods BepInEx (${mods.length} suivis${needsUpdate ? ` · ${needsUpdate} maj dispo` : ""})</h4>
+        <button onclick="checkBepInExUpdates('${esc(s.name)}')">vérifier maintenant</button>${updateAllBtn}</div>
       ${rows || `<div class="detail-empty">aucun mod suivi</div>`}
     </div>`;
+}
+
+async function checkBepInExUpdates(name) {
+  try {
+    const res = await apiCall(`/api/servers/${name}/bepinex/check`, { method: "POST" });
+    if (!res.ok) {
+      showError(`Erreur lors de la vérification (${res.status}).`);
+    } else {
+      showError("");
+    }
+    await fetchServers();
+  } catch (e) {
+    showError(String(e.message || e));
+  }
+}
+
+async function updateBepInExMods(name, slugs) {
+  // Avertissement explicite (contrairement aux mods Workshop) : ces mods exigent
+  // une version identique côté client, une MAJ serveur sans prévenir casse la
+  // connexion des joueurs déjà en jeu ou qui rejoindraient avec l'ancienne version.
+  const confirmed = await confirmDialog(
+    "Confirmer : le serveur va être ARRÊTÉ puis redémarré pour appliquer ce(s) mod(s) BepInEx. " +
+    "Les joueurs devront installer la même version côté client, sinon ils ne pourront plus rejoindre (\"Incompatible Version\"). Continuer ?");
+  if (!confirmed) return;
+
+  try {
+    const res = await apiCall(`/api/servers/${name}/bepinex/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(slugs ? { slugs } : {}),
+    });
+    if (res.status === 409) {
+      showError("Une mise à jour BepInEx est déjà en attente pour ce serveur.");
+    } else if (!res.ok) {
+      showError(`Erreur lors de la mise à jour (${res.status}).`);
+    } else {
+      showError("");
+    }
+    await fetchServers();
+  } catch (e) {
+    showError(String(e.message || e));
+  }
 }
 
 function renderDetailMods(s) {

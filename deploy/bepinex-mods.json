@@ -17,6 +17,7 @@
       "owner": "Grantapher",
       "package": "ValheimPlus_Grantapher_Temporary",
       "target": "plugins",
+      "log_plugin_name": "Valheim Plus",
       "installed_version": "10.1.1",
       "installed_paths": ["BepInEx/plugins/ValheimPlus.dll"]
     },
@@ -27,6 +28,7 @@
       "owner": "ValheimModding",
       "package": "Jotunn",
       "target": "plugins",
+      "log_plugin_name": "Jotunn",
       "installed_version": "2.30.0",
       "installed_paths": ["BepInEx/plugins/Jotunn.dll", "BepInEx/plugins/Jotunn.xml"]
     },
@@ -37,6 +39,7 @@
       "owner": "RandyKnapp",
       "package": "EquipmentAndQuickSlots",
       "target": "plugins",
+      "log_plugin_name": "Equipment and Quick Slots",
       "installed_version": "3.1.2",
       "installed_paths": ["BepInEx/plugins/EquipmentAndQuickSlots.dll"]
     },
@@ -49,6 +52,7 @@
       "asset_pattern": "^XPortal-v.*\\.zip$",
       "tag_prefix": "v",
       "target": "plugins",
+      "log_plugin_name": "XPortal",
       "installed_version": "1.2.25",
       "installed_paths": ["BepInEx/plugins/XPortal"]
     }

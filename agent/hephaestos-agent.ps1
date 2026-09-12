@@ -14,7 +14,7 @@ param(
 
 # Version rapportee dans le POST /api/agent/state (agent_version) -- a incrementer a
 # chaque changement de contrat/comportement observable par le backend.
-$script:HephAgentVersion = "2.2.0"
+$script:HephAgentVersion = "2.3.0"
 
 function Write-HephLog {
     <#
@@ -521,6 +521,9 @@ function Invoke-HephAgentCycle {
                             $result = Invoke-WriteFile -Cfg $Cfg -ServerCfg $serverCfg -Root $order.root `
                                 -Path $order.path -ContentB64 $order.content_b64 -ExpectedSha256 $order.expected_sha256
                         }
+                        "update_bepinex_mods" {
+                            $result = Update-BepInExMods -Cfg $Cfg -ServerCfg $serverCfg -Mods $order.mods
+                        }
                         default {
                             $result = [pscustomobject]@{ ok = $false; detail = "type d'ordre inconnu: $($order.type)" }
                         }
@@ -535,6 +538,10 @@ function Invoke-HephAgentCycle {
                     $extra = @{ files = @($result.files) }
                 } elseif ($order.type -eq "read_file" -and $result.PSObject.Properties.Name -contains "content_b64") {
                     $extra = @{ content_b64 = $result.content_b64; sha256 = $result.sha256 }
+                } elseif ($order.type -eq "update_bepinex_mods" -and $result.PSObject.Properties.Name -contains "bepinex_installed") {
+                    $extra = @{ bepinex_installed = @($result.bepinex_installed | ForEach-Object {
+                        @{ slug = $_.slug; version = $_.version; paths = @($_.paths) }
+                    }) }
                 }
                 Set-HephOrderStatus -Cfg $Cfg -OrderId $order.id -Status $finalStatus -Detail $result.detail -Extra $extra -LogPath $LogPath | Out-Null
                 Write-HephLog -LogPath $LogPath -Message "ordre $($order.id) [$($order.type)/$($serverCfg.name)]: ${finalStatus} -- $($result.detail)"

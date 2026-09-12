@@ -22,7 +22,7 @@ def test_app_js_served_with_ui_hooks(tmp_path):
     r = TestClient(create_app(make_settings(tmp_path))).get("/static/app.js")
     assert r.status_code == 200
     for hook in ("togglePlayers", "toggleMods", "toggleBepinex", "renderDetailMods", "renderWorkshopBrowser",
-                 "cancelOrder", "auto_update_blocked", "renderBepInExSummary"):
+                 "cancelOrder", "auto_update_blocked", "renderBepInExSummary", "updateBepInExMods", "checkBepInExUpdates"):
         assert hook in r.text, hook
 
 def test_index_references_app_js_and_has_no_inline_app_script(tmp_path):

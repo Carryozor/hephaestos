@@ -1961,3 +1961,582 @@ function Restart-GameServer {
     Start-GameServer -ServerCfg $ServerCfg
     return $backupNote
 }
+
+# --- Mods BepInEx (Valheim, pas de Steam Workshop) : telechargement direct
+# depuis Thunderstore/GitHub Releases (URL fournie par le backend, deja
+# revalidee cote agent), remplacement de fichiers, redemarrage, verification
+# horodatee du Chainloader, rollback automatique. Cf.
+# docs/plans/2026-09-12-bepinex-mod-updates.md (phase 5a/5b).
+
+# Allowlist d'hotes de telechargement -- verifiee empiriquement le 12/09/2026
+# (curl -sI sur les vraies redirections) : thunderstore.io redirige vers
+# gcdn.thunderstore.io, GitHub vers release-assets.githubusercontent.com (PAS
+# objects.githubusercontent.com, l'ancien hote -- garde par prudence). Miroir
+# exact de ALLOWED_DOWNLOAD_HOSTS cote backend (app/bepinex_sources.py).
+$script:BepInExAllowedHosts = @(
+    "thunderstore.io", "gcdn.thunderstore.io", "github.com",
+    "objects.githubusercontent.com", "release-assets.githubusercontent.com"
+)
+$script:BepInExMaxDownloadBytes = 100MB
+
+function Test-BepInExUrlAllowed {
+    <#
+    .SYNOPSIS
+        Rejette toute URL de telechargement de mod BepInEx hors allowlist,
+        non-https, ou porteuse d'identifiants embarques (P6 du plan) -- l'agent
+        ne fait jamais confiance a la seule validation backend, deuxieme couche
+        obligatoire puisque le contenu telecharge est ensuite execute (DLL).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Url
+    )
+    $uri = [Uri]$Url
+    if ($uri.Scheme -ne "https") {
+        throw "Test-BepInExUrlAllowed: schema non https refuse: ${Url}"
+    }
+    if ($uri.UserInfo) {
+        throw "Test-BepInExUrlAllowed: URL avec identifiants embarques refusee: ${Url}"
+    }
+    if ($script:BepInExAllowedHosts -notcontains $uri.Host) {
+        throw "Test-BepInExUrlAllowed: hote de telechargement non autorise: $($uri.Host)"
+    }
+}
+
+function Invoke-BepInExDownload {
+    <#
+    .SYNOPSIS
+        Telecharge un mod BepInEx vers DestPath. Valide l'URL AVANT toute
+        requete reseau, rejette (et supprime) un fichier au-dela de
+        BepInExMaxDownloadBytes. Wrapper isole autour d'Invoke-WebRequest pour
+        rester mockable en test sans reseau reel.
+    .NOTES
+        Verification qui peut echouer : la presence reelle du fichier sur disque
+        est controlee explicitement, jamais seulement le code de retour de la
+        commande de telechargement.
+
+        Revue securite du 12/09/2026 (H1) : Invoke-WebRequest suit les
+        redirections (-MaximumRedirection 5) SANS jamais revalider l'hote de
+        chaque saut -- un hote autorise qui redirigerait (open-redirect, DNS
+        hijack, CDN compromis) vers un hote hors allowlist telechargerait et
+        laisserait executer (chargement DLL par le jeu) du contenu non
+        controle. Fix : l'URL RÉELLEMENT atteinte (apres redirections) est
+        relue sur la reponse (`BaseResponse.ResponseUri` sous Windows
+        PowerShell 5.1, `BaseResponse.RequestMessage.RequestUri` sous
+        PowerShell 7+ -- les deux proprietes sont verifiees, l'agent de prod
+        tourne en 5.1 mais les tests Pester tournent sous pwsh 7 en conteneur
+        Linux) et revalidee avant de faire confiance au fichier ; le fichier
+        est supprime si l'URL finale est hors allowlist.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Url,
+        [Parameter(Mandatory)] [string]$DestPath
+    )
+    Test-BepInExUrlAllowed -Url $Url
+    try {
+        $response = Invoke-WebRequest -Uri $Url -OutFile $DestPath -MaximumRedirection 5 -UseBasicParsing -PassThru
+    } catch {
+        throw "Invoke-BepInExDownload: echec telechargement ${Url}: $($_.Exception.Message)"
+    }
+    $finalUri = $null
+    if ($response -and $response.BaseResponse) {
+        if ($response.BaseResponse.PSObject.Properties.Name -contains "ResponseUri" -and $response.BaseResponse.ResponseUri) {
+            $finalUri = $response.BaseResponse.ResponseUri
+        } elseif ($response.BaseResponse.PSObject.Properties.Name -contains "RequestMessage" -and
+                  $response.BaseResponse.RequestMessage -and $response.BaseResponse.RequestMessage.RequestUri) {
+            $finalUri = $response.BaseResponse.RequestMessage.RequestUri
+        }
+    }
+    if ($finalUri) {
+        try {
+            Test-BepInExUrlAllowed -Url $finalUri.AbsoluteUri
+        } catch {
+            Remove-Item -LiteralPath $DestPath -Force -ErrorAction SilentlyContinue
+            throw "Invoke-BepInExDownload: redirection vers un hote non autorise (${finalUri}): $($_.Exception.Message)"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $DestPath)) {
+        throw "Invoke-BepInExDownload: fichier non produit apres telechargement: ${DestPath}"
+    }
+    $size = (Get-Item -LiteralPath $DestPath).Length
+    if ($size -gt $script:BepInExMaxDownloadBytes) {
+        Remove-Item -LiteralPath $DestPath -Force
+        throw "Invoke-BepInExDownload: fichier trop volumineux (${size} octets, max ${script:BepInExMaxDownloadBytes})"
+    }
+}
+
+function Expand-BepInExPackage {
+    <#
+    .SYNOPSIS
+        Extrait un zip de mod BepInEx vers DestDir (efface DestDir au prealable
+        s'il existe). Chaque entree est validee AVANT extraction (protection
+        zip-slip) : une entree qui resoudrait hors de DestDir fait tout echouer,
+        rien n'est laisse a moitie extrait.
+    .NOTES
+        Revue securite du 12/09/2026 (H2) : double garde. Un rejet EXPLICITE sur
+        la forme litterale du nom d'entree (segment "..", chemin commencant par
+        "/", lettre de lecteur Windows type "C:") est fait AVANT tout
+        GetFullPath/Join-Path -- Path.Combine/GetFullPath ont un comportement
+        different selon la plateforme pour un chemin qui "a l'air absolu"
+        (Windows: Join-Path avec un enfant absolu ignore le parent, deja
+        rattrape par le containment check ci-dessous ; Linux, ou tournent les
+        tests Pester : "C:/x" n'est PAS reconnu comme absolu, le containment
+        check seul ne l'aurait pas rattrape). Le check explicite ci-dessous est
+        donc la garde qui marche identiquement sur les deux plateformes ; le
+        containment check GetFullPath reste en filet de securite secondaire.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$ZipPath,
+        [Parameter(Mandatory)] [string]$DestDir
+    )
+    if (Test-Path -LiteralPath $DestDir) {
+        Remove-Item -LiteralPath $DestDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $sep = [IO.Path]::DirectorySeparatorChar
+    $destFull = [IO.Path]::GetFullPath($DestDir).TrimEnd($sep) + $sep
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        foreach ($entry in $zip.Entries) {
+            if ([string]::IsNullOrEmpty($entry.Name)) {
+                continue  # entree "dossier" pure (FullName se termine par /), rien a extraire
+            }
+            $entrySegments = $entry.FullName -split "/"
+            if ($entrySegments -contains ".." -or $entry.FullName.StartsWith("/") -or $entry.FullName -match "^[A-Za-z]:") {
+                throw "Expand-BepInExPackage: entree zip invalide (traversal ou absolue): $($entry.FullName)"
+            }
+            $relative = $entry.FullName -replace "/", $sep
+            $targetPath = [IO.Path]::GetFullPath((Join-Path $DestDir $relative))
+            if (-not $targetPath.StartsWith($destFull, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Expand-BepInExPackage: entree zip hors du dossier de destination (zip-slip): $($entry.FullName)"
+            }
+            $targetDir = Split-Path -Path $targetPath -Parent
+            if (-not (Test-Path -LiteralPath $targetDir)) {
+                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+            }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $targetPath, $true)
+        }
+    } finally {
+        $zip.Dispose()
+    }
+    return $DestDir
+}
+
+function Copy-BepInExPayload {
+    <#
+    .SYNOPSIS
+        Copie le contenu utile d'un package BepInEx extrait vers le dossier serveur.
+    .NOTES
+        target="plugins" : copie <ExtractedDir>/plugins/* TEL QUEL sous
+        BepInEx/plugins/ -- BepInEx scanne ses plugins recursivement, verifie
+        empiriquement le 12/09/2026 (XPortal en sous-dossier plugins/XPortal/
+        charge sans probleme). Pas de renommage/normalisation force dans un
+        dossier <Package>/ : la structure choisie par l'auteur du mod est deja
+        correcte pour BepInEx.
+
+        target="root" (le pack BepInEx lui-meme) : copie UNIQUEMENT
+        <wrapper>/BepInEx/core, doorstop_config.ini, winhttp.dll -- ne touche
+        JAMAIS BepInEx/plugins ni BepInEx/config (ecraserait tous les autres
+        mods deja installes). <wrapper> = <ExtractedDir>/<Package>/ (les zips
+        BepInExPack_Valheim de Thunderstore sont wrappes dans un dossier du nom
+        du package), avec repli sur ExtractedDir si absent.
+
+        Retourne la liste des chemins relatifs (separateur "/", ancres a la
+        racine du dossier serveur) reellement ecrits -- persistes cote backend
+        comme installed_paths, reutilises par Remove-BepInExPaths a la
+        prochaine mise a jour.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$ExtractedDir,
+        [Parameter(Mandatory)] [string]$ServerDir,
+        [Parameter(Mandatory)] [ValidateSet("plugins", "root")] [string]$Target,
+        [Parameter(Mandatory)] [string]$Package
+    )
+    $written = [System.Collections.Generic.List[string]]::new()
+
+    if ($Target -eq "plugins") {
+        $pluginsSrc = Join-Path $ExtractedDir "plugins"
+        if (-not (Test-Path -LiteralPath $pluginsSrc)) {
+            throw "Copy-BepInExPayload: dossier 'plugins' absent du package '${Package}'"
+        }
+        $pluginsDest = Join-Path $ServerDir "BepInEx\plugins"
+        New-Item -ItemType Directory -Path $pluginsDest -Force | Out-Null
+        Get-ChildItem -LiteralPath $pluginsSrc | ForEach-Object {
+            $dest = Join-Path $pluginsDest $_.Name
+            if ($_.PSIsContainer) {
+                Copy-Item -LiteralPath $_.FullName -Destination $dest -Recurse -Force
+            } else {
+                Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
+            }
+            $written.Add("BepInEx/plugins/$($_.Name)")
+        }
+        return @($written)
+    }
+
+    $wrapper = Join-Path $ExtractedDir $Package
+    if (-not (Test-Path -LiteralPath $wrapper)) {
+        $wrapper = $ExtractedDir
+    }
+    $coreSrc = Join-Path $wrapper "BepInEx\core"
+    if (-not (Test-Path -LiteralPath $coreSrc)) {
+        throw "Copy-BepInExPayload: 'BepInEx/core' absent du package '${Package}'"
+    }
+    $coreDest = Join-Path $ServerDir "BepInEx\core"
+    if (Test-Path -LiteralPath $coreDest) {
+        Remove-Item -LiteralPath $coreDest -Recurse -Force
+    }
+    Copy-Item -LiteralPath $coreSrc -Destination $coreDest -Recurse -Force
+    $written.Add("BepInEx/core")
+
+    foreach ($file in @("doorstop_config.ini", "winhttp.dll")) {
+        $src = Join-Path $wrapper $file
+        if (Test-Path -LiteralPath $src) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $ServerDir $file) -Force
+            $written.Add($file)
+        }
+    }
+    return @($written)
+}
+
+function Remove-BepInExPaths {
+    <#
+    .SYNOPSIS
+        Supprime les anciens chemins d'un mod cible="plugins" AVANT sa
+        reinstallation (evite un double chargement du meme mod si sa structure
+        change entre deux versions -- ex. un fichier a plat remplace par un
+        dossier). Ne concerne jamais les mods cible="root" (jamais supprimes,
+        seulement ecrases en place par Copy-BepInExPayload).
+    .NOTES
+        Valide chaque chemin AVANT toute suppression (traversal, absolu, hors de
+        BepInEx/plugins/) -- ces chemins sont deja revalides cote backend
+        (storage_bepinex.validate_installed_paths), mais l'agent ne fait jamais
+        confiance a une seule couche pour une operation de suppression (P5).
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$ServerDir,
+        [Parameter(Mandatory)] [string[]]$Paths
+    )
+    foreach ($path in $Paths) {
+        $normalized = $path -replace "\\", "/"
+        $segments = $normalized -split "/"
+        if ($segments -contains ".." -or $normalized.StartsWith("/") -or $normalized -match "^[A-Za-z]:") {
+            throw "Remove-BepInExPaths: chemin invalide (traversal ou absolu): ${path}"
+        }
+        if (-not $normalized.StartsWith("BepInEx/plugins/")) {
+            throw "Remove-BepInExPaths: chemin hors de BepInEx/plugins/: ${path}"
+        }
+        $full = Join-Path $ServerDir ($normalized -replace "/", [IO.Path]::DirectorySeparatorChar)
+        if (Test-Path -LiteralPath $full) {
+            Remove-Item -LiteralPath $full -Recurse -Force
+        }
+    }
+}
+
+function Get-BepInExBackupDir {
+    <#
+    .SYNOPSIS
+        Dossier des backups zip de l'etat BepInEx (distinct du dossier de
+        backups de save, meme racine backup_root) -- ne doit jamais polluer
+        Get-GameSaveBackups (l'UI les listerait comme des saves restaurables).
+    #>
+    param(
+        [Parameter(Mandatory)] $Cfg,
+        [Parameter(Mandatory)] $ServerCfg
+    )
+    $root = if ($Cfg.PSObject.Properties.Name -contains "backup_root" -and $Cfg.backup_root) {
+        $Cfg.backup_root
+    } else {
+        Join-Path $Cfg.steamcmd_root "hephaestos-backups"
+    }
+    return Join-Path $root "$($ServerCfg.name)-bepinex"
+}
+
+function Backup-BepInExState {
+    <#
+    .SYNOPSIS
+        Zippe l'etat BepInEx courant du dossier serveur (BepInEx/, winhttp.dll,
+        doorstop_config.ini -- ce qui existe) AVANT toute modification.
+    .NOTES
+        BLOQUANT (contrairement au backup de save, best-effort) : si ce backup
+        echoue, Update-BepInExMods n'installe rien -- sans backup fiable, un
+        echec de verification post-demarrage n'aurait rien a restaurer.
+        Purge au-dela de 5 backups conserves (etat BepInEx = quelques dizaines
+        de Mo par snapshot, pas besoin d'une retention aussi longue que les saves).
+    #>
+    param(
+        [Parameter(Mandatory)] $Cfg,
+        [Parameter(Mandatory)] $ServerCfg,
+        [Parameter(Mandatory)] [string]$ServerDir
+    )
+
+    $backupDir = Get-BepInExBackupDir -Cfg $Cfg -ServerCfg $ServerCfg
+    if (-not (Test-Path -LiteralPath $backupDir)) {
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    }
+    $stagingDir = Join-Path ([IO.Path]::GetTempPath()) "hephaestos-bepinex-backup-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+    try {
+        foreach ($item in @("BepInEx", "winhttp.dll", "doorstop_config.ini")) {
+            $src = Join-Path $ServerDir $item
+            if (Test-Path -LiteralPath $src) {
+                Copy-Item -LiteralPath $src -Destination (Join-Path $stagingDir $item) -Recurse -Force
+            }
+        }
+        $file = "$((Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss'))-bepinex.zip"
+        $dest = Join-Path $backupDir $file
+        Compress-Archive -Path (Join-Path $stagingDir "*") -DestinationPath $dest -Force
+        if (-not (Test-Path -LiteralPath $dest)) {
+            throw "Backup-BepInExState: le zip n'a pas ete produit: ${dest}"
+        }
+    } finally {
+        Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    Get-ChildItem -LiteralPath $backupDir -Filter "*.zip" |
+        Sort-Object -Property Name -Descending |
+        Select-Object -Skip 5 |
+        Remove-Item -Force
+
+    return $dest
+}
+
+function Restore-BepInExBackup {
+    <#
+    .SYNOPSIS
+        Restaure un backup Backup-BepInExState par-dessus le dossier serveur
+        (ecrase les fichiers en conflit). Limite connue et acceptee : un fichier
+        ajoute par un mod du LOT qui a reussi avant qu'un AUTRE mod du meme lot
+        n'echoue ne sera pas supprime par cette restauration (Expand-Archive
+        n'efface jamais, il ecrase seulement) -- reste un fichier orphelin
+        inoffensif, pas un plugin qui charge en double (les mods qui reussissent
+        legitimement remplacent deja leurs propres anciens fichiers via
+        Remove-BepInExPaths avant copie).
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$BackupZipPath,
+        [Parameter(Mandatory)] [string]$ServerDir
+    )
+    if (-not (Test-Path -LiteralPath $BackupZipPath)) {
+        throw "Restore-BepInExBackup: backup introuvable: ${BackupZipPath}"
+    }
+    Expand-Archive -LiteralPath $BackupZipPath -DestinationPath $ServerDir -Force
+}
+
+function Get-BepInExLogStatus {
+    <#
+    .SYNOPSIS
+        Lit BepInEx/LogOutput.log (PAS le log console applicatif -- lui seul
+        contient les lignes "N plugins to load"/"Loading [Nom Version]"/
+        "Chainloader startup complete", verifie empiriquement le 12/09/2026)
+        et rapporte l'etat du dernier demarrage.
+    .NOTES
+        Jamais d'exception (meme motif que Get-ValheimLogInfo) : fichier
+        absent/illisible -> ChainloaderComplete=$false, Plugins=@().
+
+        P2 (verification qui peut echouer) : MinWriteTimeUtc rejette un
+        LogOutput.log dont la derniere ecriture PRECEDE ce seuil, meme s'il
+        contient deja un "Chainloader startup complete" d'un boot precedent --
+        sans ce garde, un redemarrage rate laisserait relire l'ancien succes et
+        rendrait la verification mensongere.
+
+        P3 : les lignes "[Error]" (shaders manquants, cinematique d'intro ratee
+        sur un headless -nographics -- presentes meme SANS aucun mod) ne sont
+        jamais un critere d'echec ici, seule l'absence du marqueur de fin de
+        Chainloader ou d'un plugin attendu compte (verifie par l'appelant).
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$LogPath,
+        [Parameter(Mandatory)] [datetime]$MinWriteTimeUtc
+    )
+    $empty = [pscustomobject]@{ ChainloaderComplete = $false; Plugins = @() }
+    try {
+        if (-not (Test-Path -LiteralPath $LogPath)) {
+            return $empty
+        }
+        $lastWrite = (Get-Item -LiteralPath $LogPath).LastWriteTimeUtc
+        if ($lastWrite -lt $MinWriteTimeUtc) {
+            return $empty
+        }
+        $content = Get-Content -LiteralPath $LogPath -Raw
+        $complete = $content -match "Chainloader startup complete"
+        $plugins = @()
+        foreach ($m in [regex]::Matches($content, "Loading \[([^\]]+) (\S+)\]")) {
+            $plugins += [pscustomobject]@{ Name = $m.Groups[1].Value; Version = $m.Groups[2].Value }
+        }
+        return [pscustomobject]@{ ChainloaderComplete = [bool]$complete; Plugins = $plugins }
+    } catch {
+        return $empty
+    }
+}
+
+function Update-BepInExMods {
+    <#
+    .SYNOPSIS
+        Sequence complete de mise a jour groupee de N mods BepInEx.
+    .NOTES
+        $Mods : tableau d'objets {slug, package, version, download_url, target,
+        previous_paths, expected_plugin}. expected_plugin (nom attendu dans une
+        ligne "Loading [<Nom> ...]") est $null/absent pour le pack BepInEx
+        lui-meme (target=root, n'apparait jamais dans la liste des plugins
+        charges par le Chainloader).
+
+        Sequence non negociable (cf. plan, section Phase 5a) :
+        1. Telecharge+extrait TOUS les mods en staging AVANT tout arret (P8) --
+           un Thunderstore/GitHub indisponible ne doit jamais couper le serveur
+           pour rien.
+        2. Backup de la save (best-effort, meme motif que Update-GameServer).
+        3. Arret du serveur.
+        4. Backup BLOQUANT de l'etat BepInEx courant (etape 4 obligatoire avant
+           toute modification -- pas de backup, pas de MAJ).
+        5. Retrait des anciens chemins "plugins" puis pose des nouveaux fichiers.
+        6. Redemarrage + verification horodatee du Chainloader (P2/P3) : rollback
+           automatique (restauration + redemarrage) si le Chainloader n'est
+           jamais confirme ou si un plugin attendu manque a l'appel.
+
+        Chaque etape de rollback est elle-meme protegee par un try/catch (meme
+        piege F2 que Update-GameServer : Start-GameServer peut throw si le
+        process ne remonte pas, l'exception ne doit jamais s'echapper de cette
+        fonction).
+    #>
+    param(
+        [Parameter(Mandatory)] $Cfg,
+        [Parameter(Mandatory)] $ServerCfg,
+        [Parameter(Mandatory)] [array]$Mods
+    )
+
+    $serverDir = Get-ServerInstallDir -SteamRoot $Cfg.steamcmd_root -AppId $ServerCfg.appid
+    $stagingRoot = Join-Path ([IO.Path]::GetTempPath()) "hephaestos-bepinex-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+
+    try {
+        $prepared = @()
+        foreach ($mod in $Mods) {
+            try {
+                $zipPath = Join-Path $stagingRoot "$($mod.package).zip"
+                Invoke-BepInExDownload -Url $mod.download_url -DestPath $zipPath
+                $extractDir = Expand-BepInExPackage -ZipPath $zipPath -DestDir (Join-Path $stagingRoot $mod.package)
+                $prepared += [pscustomobject]@{ Mod = $mod; ExtractedDir = $extractDir }
+            } catch {
+                return [pscustomobject]@{
+                    ok     = $false
+                    detail = "preparation echouee pour '$($mod.slug)': $($_.Exception.Message) -- aucun fichier modifie, serveur non touche"
+                }
+            }
+        }
+
+        $backupNote = ""
+        try {
+            if (Get-GameSaveDir -Cfg $Cfg -ServerCfg $ServerCfg) {
+                $saveBackup = Backup-GameSave -Cfg $Cfg -ServerCfg $ServerCfg -Kind "pre-bepinex"
+                $backupNote = " (save: ${saveBackup})"
+            }
+        } catch {
+            $backupNote = " (BACKUP DE SAVE ECHOUE: $($_.Exception.Message))"
+        }
+
+        Stop-GameServer -Cfg $Cfg -ServerCfg $ServerCfg
+
+        try {
+            $bepinexBackup = Backup-BepInExState -Cfg $Cfg -ServerCfg $ServerCfg -ServerDir $serverDir
+        } catch {
+            $rollbackDetail = ""
+            try { Start-GameServer -ServerCfg $ServerCfg } catch {
+                $rollbackDetail = " ET le redemarrage de secours a aussi echoue: $($_.Exception.Message)"
+            }
+            return [pscustomobject]@{
+                ok     = $false
+                detail = "backup de l'etat BepInEx echoue, mise a jour annulee: $($_.Exception.Message)${rollbackDetail}"
+            }
+        }
+
+        try {
+            foreach ($p in $prepared) {
+                if ($p.Mod.target -eq "plugins" -and $p.Mod.previous_paths) {
+                    Remove-BepInExPaths -ServerDir $serverDir -Paths $p.Mod.previous_paths
+                }
+            }
+            $installed = @()
+            foreach ($p in $prepared) {
+                $paths = Copy-BepInExPayload -ExtractedDir $p.ExtractedDir -ServerDir $serverDir `
+                    -Target $p.Mod.target -Package $p.Mod.package
+                $installed += [pscustomobject]@{ slug = $p.Mod.slug; version = $p.Mod.version; paths = $paths }
+            }
+        } catch {
+            $rollbackDetail = ""
+            try {
+                Restore-BepInExBackup -BackupZipPath $bepinexBackup -ServerDir $serverDir
+                Start-GameServer -ServerCfg $ServerCfg
+            } catch {
+                $rollbackDetail = " ET le rollback a aussi echoue: $($_.Exception.Message)"
+            }
+            return [pscustomobject]@{
+                ok     = $false
+                detail = "pose des fichiers echouee: $($_.Exception.Message) -- restauration tentee${rollbackDetail}"
+            }
+        }
+
+        $startedAt = (Get-Date).ToUniversalTime()
+        try {
+            Start-GameServer -ServerCfg $ServerCfg
+        } catch {
+            $rollbackDetail = ""
+            try {
+                Restore-BepInExBackup -BackupZipPath $bepinexBackup -ServerDir $serverDir
+                Start-GameServer -ServerCfg $ServerCfg
+            } catch {
+                $rollbackDetail = " ET le rollback a aussi echoue: $($_.Exception.Message)"
+            }
+            return [pscustomobject]@{
+                ok     = $false
+                detail = "redemarrage echoue apres pose des mods: $($_.Exception.Message) -- restauration tentee${rollbackDetail}"
+            }
+        }
+
+        $logPath = Join-Path $serverDir "BepInEx\LogOutput.log"
+        $maxSeconds = 180
+        $intervalSeconds = 5
+        $elapsed = 0
+        $status = $null
+        while ($elapsed -lt $maxSeconds) {
+            $status = Get-BepInExLogStatus -LogPath $logPath -MinWriteTimeUtc $startedAt
+            if ($status.ChainloaderComplete) { break }
+            Start-Sleep -Seconds $intervalSeconds
+            $elapsed += $intervalSeconds
+        }
+
+        $expectedNames = @($Mods | Where-Object { $_.PSObject.Properties.Name -contains "expected_plugin" -and $_.expected_plugin } |
+            ForEach-Object { $_.expected_plugin })
+        $loadedNames = @($status.Plugins | ForEach-Object { $_.Name })
+        $missing = @($expectedNames | Where-Object { $loadedNames -notcontains $_ })
+
+        if (-not $status.ChainloaderComplete -or $missing.Count -gt 0) {
+            $reason = if (-not $status.ChainloaderComplete) {
+                "Chainloader non confirme apres ${maxSeconds}s"
+            } else {
+                "plugin(s) manquant(s) apres demarrage: $($missing -join ', ')"
+            }
+            $rollbackDetail = ""
+            try {
+                Stop-GameServer -Cfg $Cfg -ServerCfg $ServerCfg
+                Restore-BepInExBackup -BackupZipPath $bepinexBackup -ServerDir $serverDir
+                Start-GameServer -ServerCfg $ServerCfg
+            } catch {
+                $rollbackDetail = " ET le rollback a aussi echoue: $($_.Exception.Message)"
+            }
+            return [pscustomobject]@{
+                ok     = $false
+                detail = "verification post-demarrage echouee (${reason}) -- restauration tentee${rollbackDetail}"
+            }
+        }
+
+        return [pscustomobject]@{
+            ok                = $true
+            detail            = "mise a jour reussie: $((($installed | ForEach-Object { "$($_.slug) -> $($_.version)" }) -join ', '))${backupNote}"
+            bepinex_installed = $installed
+        }
+    } finally {
+        Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}

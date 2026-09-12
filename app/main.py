@@ -12,6 +12,7 @@ from app import (
     routes_admin,
     routes_agent,
     routes_auth,
+    routes_bepinex,
     routes_deploy,
     routes_files,
     routes_setup,
@@ -39,6 +40,7 @@ def create_app(settings: Settings, http_client: httpx.AsyncClient | None = None)
     app.include_router(routes_admin.router)
     app.include_router(routes_deploy.router)
     app.include_router(routes_files.router)
+    app.include_router(routes_bepinex.router)
     app.include_router(routes_agent.router)
     app.include_router(routes_auth.router)
     app.include_router(routes_users.router)

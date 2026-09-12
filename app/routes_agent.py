@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
@@ -31,6 +32,11 @@ class OrderResult(BaseModel):
         Field(default=None, max_length=500)
     content_b64: Annotated[str, StringConstraints(max_length=700_000)] | None = None
     sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")] | None = None
+    # Resultat update_bepinex_mods : l'agent est une source non fiable (P5/P6),
+    # bornes strictes + revalidation des chemins par BepInExRepository.set_installed
+    # (jamais confiance a une seule couche pour un chemin ensuite exploitable en
+    # suppression).
+    bepinex_installed: list[dict] | None = Field(default=None, max_length=20)
 
 
 # extra="ignore" (et non "forbid") sur les modeles remplis par l'agent : un agent
@@ -127,6 +133,31 @@ async def report_order(request: Request, order_id: str, result: OrderResult):
             # horodatage consomme par purge_stale_file_reads : ce bloc contient un
             # secret en clair (AdminPassword) et ne doit pas survivre au-dela du TTL.
             "read_at": datetime.now(UTC).isoformat()}})
+    if order["status"] == "done" and order["type"] == "update_bepinex_mods":
+        # Revue securite du 12/09/2026 (M2) : ne persiste que les slugs qui
+        # appartenaient reellement a CET ordre -- un agent qui rapporterait un
+        # slug hors de l'ordre traite ne doit jamais pouvoir ecraser le
+        # bookkeeping (installed_paths) d'un AUTRE mod, qui serait ensuite
+        # passe en previous_paths a une future suppression (Remove-BepInExPaths).
+        ordered_slugs = {m.get("slug") for m in (order.get("mods") or [])}
+        for entry in (result.bepinex_installed or []):
+            if entry.get("slug") not in ordered_slugs:
+                logging.getLogger(__name__).warning(
+                    "update_bepinex_mods [%s]: slug '%s' hors de l'ordre traite, ignore",
+                    order["server"], entry.get("slug"))
+                continue
+            try:
+                await request.app.state.store.bepinex.set_installed(
+                    order["server"], entry.get("slug"),
+                    version=entry.get("version"), paths=list(entry.get("paths") or []),
+                )
+            except (ValueError, TypeError, KeyError):
+                # Chemin invalide ou entree mal formee rapportee par l'agent (source
+                # non fiable, P5) : ignoree plutot que de faire echouer tout le
+                # rapport -- les autres mods du meme ordre restent persistes.
+                logging.getLogger(__name__).warning(
+                    "update_bepinex_mods [%s]: entree bepinex_installed ignoree (invalide): %r",
+                    order["server"], entry)
     if order["status"] == "failed":
         # sans ca, un echec (steamcmd auth expiree, restore rate...) reste invisible
         # tant que personne n'ouvre le dashboard

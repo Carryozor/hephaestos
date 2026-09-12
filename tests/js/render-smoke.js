@@ -669,8 +669,34 @@ vm.runInContext("openModsPanels.delete('modstoggle')", sandbox);
   if (!bepinexDetailHtml.includes("Jötunn") || !bepinexDetailHtml.includes("XPortal")) {
     throw new Error("plein ecran : colonne bepinex incomplete pour un serveur sans workshop_appid");
   }
-  if (bepinexDetailHtml.includes("mettre à jour")) {
-    throw new Error("plein ecran bepinex : bouton de mise a jour ne doit pas exister (phase 5 non livree)");
+  // XPortal a update_available:true dans bepinexServer -- bouton "mettre a jour"
+  // attendu pour lui, PAS pour Jotunn (a jour). "tout mettre a jour" absent tant
+  // qu'un seul mod a une maj dispo (seuil >1, meme motif que updateAllMods).
+  if (!bepinexDetailHtml.includes("updateBepInExMods('valheim', ['c/d'])")) {
+    throw new Error("plein ecran bepinex : bouton de mise a jour par mod absent");
+  }
+  if (bepinexDetailHtml.includes("tout mettre à jour")) {
+    throw new Error("plein ecran bepinex : bouton 'tout mettre a jour' ne devrait pas apparaitre pour un seul mod en retard");
+  }
+  if (!bepinexDetailHtml.includes("checkBepInExUpdates('valheim')")) {
+    throw new Error("plein ecran bepinex : bouton de verification manuelle absent");
+  }
+
+  // 2 mods en retard -> le bouton groupe apparait
+  const bepinexTwoUpdates = {
+    ...bepinexCardServer,
+    bepinex_mods: [
+      { slug: "a/b", title: "Jötunn", installed_version: "2.30.0", latest_version: "2.31.0",
+        latest_checked_at: "2026-09-12T00:00:00+00:00", last_error: null, update_available: true },
+      { slug: "c/d", title: "XPortal", installed_version: "1.2.25", latest_version: "1.2.26",
+        latest_checked_at: "2026-09-12T00:00:00+00:00", last_error: null, update_available: true },
+    ],
+  };
+  sandbox.__bepinexServer = bepinexTwoUpdates;
+  const bepinexTwoHtml = vm.runInContext(
+    "renderDetailMods(__bepinexServer); detailMods.innerHTML", sandbox);
+  if (!bepinexTwoHtml.includes("tout mettre à jour (2)") || !bepinexTwoHtml.includes("updateBepInExMods('valheim', null)")) {
+    throw new Error("plein ecran bepinex : bouton groupe absent avec 2 mods en retard");
   }
 
   console.log("SMOKE OK");

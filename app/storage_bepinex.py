@@ -7,19 +7,36 @@ Store, pas de fichier ni de verrou separe.
 import re
 from datetime import UTC, datetime
 
+# target="root" (le pack BepInEx lui-meme) : seuls ces 3 chemins sont legitimes
+# (cf. Copy-BepInExPayload cote agent). Contrairement a target="plugins", ils ne
+# sont jamais supprimes (D6 du plan) -- mais suite a la revue securite du
+# 12/09/2026 (M1), on ne se contente plus de rejeter seulement traversal/absolu
+# pour ce cas : un chemin relatif quelconque hors de cette liste ne doit pas
+# pouvoir polluer installed_paths, meme si rien ne l'exploite aujourd'hui.
+ROOT_TARGET_ALLOWED_PATHS = frozenset({"BepInEx/core", "winhttp.dll", "doorstop_config.ini"})
+
 
 def validate_installed_paths(paths: list[str], target: str) -> None:
-    """Rejette tout chemin de traversal/absolu, et pour target="plugins" exige
-    qu'il soit sous BepInEx/plugins/ -- ces chemins sont plus tard passes a
+    """Rejette tout chemin de traversal/absolu/non-string, et pour target="plugins"
+    exige qu'il soit sous BepInEx/plugins/ -- ces chemins sont plus tard passes a
     l'agent comme cibles de suppression (Remove-BepInExPaths), jamais faire
-    confiance a une entree qui n'a pas ete validee ici."""
+    confiance a une entree qui n'a pas ete validee ici.
+
+    Revue securite/qualite du 12/09/2026 : un `path` non-string (rapport agent
+    malforme) levait AttributeError (non intercepte par report_order) au lieu
+    d'un ValueError propre -- verifie explicitement en premier desormais.
+    """
     for path in paths:
+        if not isinstance(path, str):
+            raise ValueError(f"chemin invalide (attendu une chaine): {path!r}")
         normalized = path.replace("\\", "/")
         segments = normalized.split("/")
         if ".." in segments or normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
             raise ValueError(f"chemin invalide (traversal ou absolu): {path}")
         if target == "plugins" and not normalized.startswith("BepInEx/plugins/"):
             raise ValueError(f"chemin hors de BepInEx/plugins/ pour une cible plugins: {path}")
+        if target == "root" and normalized not in ROOT_TARGET_ALLOWED_PATHS:
+            raise ValueError(f"chemin non attendu pour une cible root: {path}")
 
 
 class BepInExRepository:
@@ -50,6 +67,14 @@ class BepInExRepository:
                     "asset_pattern": m.get("asset_pattern"),
                     "tag_prefix": m.get("tag_prefix"),
                     "target": m["target"],
+                    # Nom EXACT attendu dans une ligne "Loading [<Nom> <version>]" de
+                    # BepInEx/LogOutput.log -- distinct a la fois de `package` (slug
+                    # Thunderstore, ex. "ValheimPlus_Grantapher_Temporary" affiche
+                    # "Valheim Plus") et de `title` (ex. "Jötunn" affiche "Jotunn" sans
+                    # accent) : verifie empiriquement le 12/09/2026, aucun des deux
+                    # autres champs ne matche de façon fiable. None pour target="root"
+                    # (le pack BepInEx lui-meme n'apparait jamais dans cette liste).
+                    "log_plugin_name": m.get("log_plugin_name"),
                     "installed_version": m["installed_version"],
                     "plugin_version": None,
                     "installed_paths": list(m.get("installed_paths", [])),

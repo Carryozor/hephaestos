@@ -94,6 +94,30 @@ async def test_seed_rejects_traversal_in_installed_paths(tmp_path):
         store.bepinex.seed_if_empty(bad_seed)
 
 
+async def test_seed_rejects_root_path_outside_fixed_allowlist(tmp_path):
+    """Revue securite 12/09 (M1) : target=root n'accepte QUE les 3 chemins
+    legitimes connus (BepInEx/core, winhttp.dll, doorstop_config.ini) -- un
+    chemin relatif quelconque hors de cette liste ne doit pas polluer
+    installed_paths, meme si rien ne l'exploite aujourd'hui (paths root jamais
+    supprimes, cf. D6 du plan)."""
+    store = make_store(tmp_path)
+    bad_seed = {"valheim": [
+        {"slug": "a/b", "title": "T", "source": "thunderstore", "owner": "a", "package": "b",
+         "target": "root", "installed_version": "1.0.0",
+         "installed_paths": ["BepInEx/plugins/sournois.dll"]},
+    ]}
+    with pytest.raises(ValueError):
+        store.bepinex.seed_if_empty(bad_seed)
+
+
+async def test_seed_accepts_known_root_paths(tmp_path):
+    store = make_store(tmp_path)
+    store.bepinex.seed_if_empty(VALHEIM_SEED)  # deja BepInExPack_Valheim en target=root
+    entries = await store.bepinex.all("valheim")
+    assert entries["denikson/BepInExPack_Valheim"]["installed_paths"] == [
+        "BepInEx/core", "winhttp.dll", "doorstop_config.ini"]
+
+
 async def test_seed_rejects_plugins_path_outside_plugins_dir(tmp_path):
     store = make_store(tmp_path)
     bad_seed = {"valheim": [
@@ -169,6 +193,20 @@ async def test_set_installed_unknown_slug_is_noop(tmp_path):
     await store.bepinex.set_installed("valheim", "unknown/slug", version="1.0.0",
                                       paths=["BepInEx/plugins/x.dll"])
     assert "unknown/slug" not in await store.bepinex.all("valheim")
+
+
+async def test_seed_rejects_non_string_path_with_valueerror_not_attributeerror(tmp_path):
+    """Revue 12/09 (HIGH) : un rapport agent malforme (element de `paths` non-string)
+    doit echouer proprement (ValueError, deja intercepte par report_order), jamais
+    une AttributeError qui ferait planter tout le rapport en 500."""
+    store = make_store(tmp_path)
+    bad_seed = {"valheim": [
+        {"slug": "a/b", "title": "T", "source": "thunderstore", "owner": "a", "package": "b",
+         "target": "plugins", "installed_version": "1.0.0",
+         "installed_paths": ["BepInEx/plugins/x.dll", 123]},
+    ]}
+    with pytest.raises(ValueError):
+        store.bepinex.seed_if_empty(bad_seed)
 
 
 async def test_set_installed_rejects_bad_paths(tmp_path):

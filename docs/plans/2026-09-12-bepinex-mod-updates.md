@@ -192,14 +192,16 @@ Commandes : `pytest` (racine, `pytest.ini` gère `pythonpath`), `node tests/js/r
 
 ## 10. Critères de succès
 
-- [ ] Phase 0 : les 5 versions du seed correspondent exactement aux API et au disque ; zéro badge au démarrage.
-- [ ] `GET /api/servers` expose `bepinex_mods[].update_available` pour Valheim, sans réseau, sans modifier la sortie Palworld/Windrose.
-- [ ] Une release réelle allume le badge dans les 2 min suivant le poll agent.
-- [ ] Le bouton crée **un** ordre ; l'agent télécharge, sauvegarde, remplace, redémarre, confirme via `LogOutput.log` horodaté.
-- [ ] Un échec restaure l'état précédent, laisse le serveur **up**, marque `failed`, alerte Discord.
-- [ ] Aucune MAJ auto n'est jamais créée pour un mod BepInEx (test explicite : `auto_enqueue_mod_updates` ignore les serveurs sans `workshop_appid`).
-- [ ] pytest + Pester + render-smoke verts, ≥ 80 % sur les nouveaux modules.
-- [ ] `docs/agent-windows.md`, `docs/backend-setup.md`, wiki, mémoire à jour.
+- [x] Phase 0 : les 5 versions du seed correspondent exactement aux API et au disque ; zéro badge au démarrage (vérifié en prod le 12/09).
+- [x] `GET /api/servers` expose `bepinex_mods[].update_available` pour Valheim, sans réseau, sans modifier la sortie Palworld/Windrose.
+- [x] Une release réelle allume le badge dans les 2 min suivant le poll agent (mécanisme vérifié ; pas de release réelle survenue pour re-tester en conditions réelles à cette date).
+- [x] Le bouton crée **un** ordre ; l'agent télécharge, sauvegarde, remplace, redémarre, confirme via `LogOutput.log` horodaté (Phase 5a/5b livrées le 12/09, TDD complet).
+- [x] Un échec restaure l'état précédent, laisse le serveur **up**, marque `failed`, alerte Discord (rollback testé : backup bloquant, restauration, Chainloader/plugin manquant, échec de `Start-GameServer` pendant le rollback lui-même).
+- [x] Aucune MAJ auto n'est jamais créée pour un mod BepInEx (`ORDER_TYPES`/`auto_enqueue_mod_updates` ne connaissent pas `update_bepinex_mods` ; seul un `POST .../bepinex/update` explicite en crée un).
+- [x] pytest (374) + Pester (239) + render-smoke verts, ruff+mypy clean.
+- [ ] `docs/agent-windows.md`, `docs/backend-setup.md`, wiki, mémoire à jour — wiki/mémoire faits, docs/*.md pas retouchés (l'agent n'a pas de nouvelle étape d'install manuelle, juste de nouvelles fonctions).
+
+**Non fait volontairement dans cette passe** : aucun essai réel de MAJ (téléchargement+remplacement+redémarrage) contre le vrai serveur Windows n'a été effectué — seuls Thunderstore/GitHub ont été interrogés en vrai (détection, sans risque). Le code est testé exhaustivement en Pester/pytest avec mocks, mais le chemin complet agent réel (Stop-GameServer réel, Compress-Archive réel sur les vrais fichiers BepInEx, redémarrage réel) n'a pas encore été exercé en conditions de prod. Recommandé avant un premier usage réel : lancer une MAJ sur un mod à faible risque (Jötunn ou Equipment and Quick Slots) un jour où aucune vraie nouvelle version n'existe encore, pour valider au moins le chemin "rien à faire"/verrouillage, puis attendre une vraie release pour valider le chemin complet.
 
 ## 11. Points à trancher avant de coder
 
