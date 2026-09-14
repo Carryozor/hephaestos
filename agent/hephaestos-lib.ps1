@@ -1476,6 +1476,14 @@ function Install-WorkshopMod {
         [string]$WorkshopId
     )
 
+    # Defense en profondeur (le backend borne deja workshop_id a ^\d{1,20}$) : $WorkshopId
+    # est concatene dans des chemins passes a Copy-Item/Remove-Item -- un id de traversal
+    # ('..' etc.) resout meme sous -LiteralPath, et l'agent tourne en Administrator. Ne
+    # jamais faire confiance a une seule couche pour une valeur ensuite manipulee sur disque.
+    if ($WorkshopId -notmatch '^\d{1,20}$') {
+        throw "Install-WorkshopMod: workshop_id invalide (numerique attendu): ${WorkshopId}"
+    }
+
     $login = if ($Cfg.PSObject.Properties.Name -contains "steamcmd_login" -and $Cfg.steamcmd_login) {
         $Cfg.steamcmd_login
     } else {
@@ -1543,6 +1551,13 @@ function Remove-WorkshopMod {
         [Parameter(Mandatory)]
         [string]$WorkshopId
     )
+
+    # Defense en profondeur (cf. Install-WorkshopMod) : -LiteralPath resout quand meme
+    # '..', et Remove-Item -Recurse tourne en Administrator -- un id de traversal ferait
+    # supprimer des dossiers hors du mod. Le backend borne deja, l'agent revalide.
+    if ($WorkshopId -notmatch '^\d{1,20}$') {
+        throw "Remove-WorkshopMod: workshop_id invalide (numerique attendu): ${WorkshopId}"
+    }
 
     $installDir = Get-ServerInstallDir -SteamRoot $Cfg.steamcmd_root -AppId $ServerCfg.appid
     $modDir = Join-Path $installDir "Mods\Workshop\$WorkshopId"

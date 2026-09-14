@@ -344,6 +344,20 @@ def test_mods_remove_duplicate_pending_returns_409(tmp_path):
     assert c.delete("/api/servers/palworld/mods/3147025543").status_code == 409
 
 
+def test_mods_remove_rejects_non_numeric_workshop_id(tmp_path):
+    """SECURITE (CRITICAL) : workshop_id part tel quel dans un ordre remove_mod que
+    l'agent traduit en `Remove-Item -LiteralPath ...\\Mods\\Workshop\\<id> -Recurse`.
+    -LiteralPath resout quand meme '..', et l'agent tourne en Administrator -- un id
+    de traversal ferait donc supprimer des dossiers hors du mod (jusqu'a la racine du
+    disque). Seuls des PublishedFileId Steam (numeriques, <= 20 chiffres) passent."""
+    c = make_client_with_workshop(tmp_path)
+    for bad in ["..%5C..%5C..%5C..", "abc", "3147025543x", "-1", "1" * 21]:
+        r = c.delete(f"/api/servers/palworld/mods/{bad}")
+        assert r.status_code == 422, (bad, r.status_code)
+    # un id legitime passe toujours
+    assert c.delete("/api/servers/palworld/mods/3147025543").status_code == 201
+
+
 def test_list_servers_exposes_mods_info(tmp_path):
     c = make_client_with_workshop(tmp_path)
     c.post("/api/servers/palworld/mods", json={
@@ -1184,3 +1198,24 @@ def test_detail_exposes_files_listing_and_file_read(tmp_path):
     assert detail["files_listing"] == {"install": ["a.ini"]}
     assert detail["file_read"]["path"] == "a.ini"
     assert "rcon" not in detail  # detail ne spread jamais le registre brut
+
+
+def test_detail_hides_file_read_and_listing_from_non_admin(tmp_path):
+    """SECURITE (HIGH) : file_read contient le contenu d'un fichier de config lu par
+    un admin -- pour Palworld, PalWorldSettings.ini porte AdminPassword en clair. La
+    lecture de fichier (/files/read) est deja reservee aux admins (403 sinon) ; le
+    detail ne doit pas rouvrir ce contenu (ni l'arborescence) a un role user par une
+    porte detournee."""
+    app, admin, user = make_admin_and_user_clients(tmp_path)
+    asyncio.run(app.state.store.registry.update_entry("palworld", {
+        "files_listing": {"install": ["PalWorldSettings.ini"]},
+        "file_read": {"root": "install", "path": "PalWorldSettings.ini",
+                      "content_b64": "QWRtaW5QYXNzd29yZD1zZWNyZXQ=", "sha256": "a" * 64}}))
+    # l'admin voit bien le contenu et l'arborescence
+    ad = admin.get("/api/servers/palworld/detail").json()
+    assert ad["file_read"]["path"] == "PalWorldSettings.ini"
+    assert ad["files_listing"] == {"install": ["PalWorldSettings.ini"]}
+    # le role user (pourtant assigne a palworld) ne voit ni l'un ni l'autre
+    us = user.get("/api/servers/palworld/detail").json()
+    assert us["file_read"] is None
+    assert us["files_listing"] == {}

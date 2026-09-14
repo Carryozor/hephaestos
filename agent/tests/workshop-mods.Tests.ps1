@@ -198,6 +198,25 @@ Describe "Remove-WorkshopMod" {
     }
 
     It "ne leve pas d'exception si le mod est deja absent" {
-        { Remove-WorkshopMod -Cfg $script:cfgRemove -ServerCfg $script:serverCfgRemove -WorkshopId "deja-parti" } | Should -Not -Throw
+        { Remove-WorkshopMod -Cfg $script:cfgRemove -ServerCfg $script:serverCfgRemove -WorkshopId "999999" } | Should -Not -Throw
+    }
+
+    It "SECURITE : rejette un workshop_id de traversal SANS rien supprimer" {
+        # Sentinelle hors du dossier du mod : un id '..\..\..\..' resoudrait vers la
+        # racine sous -LiteralPath. La garde numerique doit throw AVANT tout Remove-Item.
+        $sentinel = Join-Path $script:steamRootRemove "steamapps\common\PalServer"
+        Test-Path -LiteralPath $sentinel | Should -Be $true
+        { Remove-WorkshopMod -Cfg $script:cfgRemove -ServerCfg $script:serverCfgRemove -WorkshopId "..\..\..\.." } |
+            Should -Throw "*workshop_id invalide*"
+        Test-Path -LiteralPath $sentinel | Should -Be $true
+    }
+}
+
+Describe "Install-WorkshopMod garde workshop_id" {
+    It "SECURITE : rejette un workshop_id non numerique avant tout acces disque" {
+        $cfg = [pscustomobject]@{ steamcmd_root = (Join-Path $TestDrive "s"); steamcmd = "C:\steam\steamcmd.exe" }
+        $server = [pscustomobject]@{ appid = 2394010; workshop_appid = 1623730 }
+        { Install-WorkshopMod -Cfg $cfg -ServerCfg $server -WorkshopId "..\..\evil" } |
+            Should -Throw "*workshop_id invalide*"
     }
 }

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from pydantic import BaseModel, Field
 
 from app import bepinex as bepinex_service
@@ -153,6 +153,11 @@ async def get_server_detail(request: Request, name: str):
     snap = await store.snapshot()
     state = snap["servers"].get(name) or {}
     reg = await store.registry.get(name) or {}
+    # file_read/files_listing = contenu d'un fichier de config lu par un admin (pour
+    # Palworld, PalWorldSettings.ini porte AdminPassword en clair). La lecture de
+    # fichier (/files/read) est deja reservee aux admins ; le detail ne doit pas
+    # rouvrir ce contenu a un role user par une porte detournee.
+    is_admin = request.state.user["role"] == "admin"
 
     uptime_seconds = None
     started = state.get("process_started_at")
@@ -199,8 +204,8 @@ async def get_server_detail(request: Request, name: str):
              "created": o["created"], "detail": o.get("detail"), "title": o.get("title")}
             for o in await store.order_history(name)
         ],
-        "files_listing": reg.get("files_listing") or {},
-        "file_read": reg.get("file_read"),
+        "files_listing": (reg.get("files_listing") or {}) if is_admin else {},
+        "file_read": reg.get("file_read") if is_admin else None,
     }
 
 
@@ -309,7 +314,13 @@ async def update_all_mods(request: Request, name: str):
 
 
 @router.delete("/{name}/mods/{workshop_id}", status_code=201)
-async def remove_mod(request: Request, name: str, workshop_id: str):
+async def remove_mod(request: Request, name: str,
+                     workshop_id: str = Path(pattern=r"^\d{1,20}$")):
+    # workshop_id borne a un PublishedFileId Steam (numerique) : il part dans un ordre
+    # remove_mod que l'agent traduit en `Remove-Item -LiteralPath ...\Mods\Workshop\<id>
+    # -Recurse` -- -LiteralPath resout quand meme '..', et l'agent tourne en Administrator,
+    # donc un id de traversal ferait supprimer des dossiers hors du mod. L'agent revalide
+    # de son cote (defense en profondeur), mais la borne d'entree ne doit pas manquer ici.
     await _require_workshop_server(request, name)
     store = request.app.state.store
 
