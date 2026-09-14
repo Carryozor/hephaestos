@@ -328,7 +328,22 @@ function Invoke-HephAgentCycle {
         # Chemin du fichier de config sur disque -- necessaire pour persister la config
         # serveurs poussee par le backend (Update-HephServersFromBackend, plus bas dans ce
         # cycle). Defaut aligne sur celui du script pour un appel direct hors tests.
-        [string]$ConfigPath = (Join-Path $PSScriptRoot "hephaestos-config.json")
+        [string]$ConfigPath = (Join-Path $PSScriptRoot "hephaestos-config.json"),
+
+        # Activation reactive (long-poll) : au lieu de terminer le cycle des la file
+        # videe, on continue d'interroger le backend avec ?wait pendant cette fenetre
+        # (secondes, horloge murale). Un ordre cree par un clic admin est alors pris en
+        # ~1s au lieu d'attendre le prochain tick planifie (2 min). 0 = desactive
+        # (drainage historique : GET nu, fin des que la file est vide) -- defaut des
+        # tests ; l'entrypoint reel passe LongPollWindowSeconds > 0. La fenetre doit
+        # rester sous l'intervalle du tick planifie (2 min) : IgnoreNew empeche le
+        # chevauchement, le tick suivant reprend a la fin de la fenetre.
+        [int]$LongPollWindowSeconds = 0,
+
+        # Duree d'attente serveur par requete long-poll (l'agent enchaine plusieurs
+        # requetes courtes dans la fenetre : plus robuste aux coupures qu'une seule
+        # longue). Le backend borne cette valeur de son cote.
+        [int]$LongPollWaitSeconds = 30
     )
 
     Write-HephLog -LogPath $LogPath -Message "=== cycle demarre ==="
@@ -376,11 +391,28 @@ function Invoke-HephAgentCycle {
     # immediatement a l'infini -- la cadence 2 min throttlait naturellement l'ancien
     # code mono-ordre. Plafond dur en ceinture-bretelles.
     $attemptedOrderIds = @{}
-    $maxDrainIterations = 20
-    for ($drainIteration = 0; $drainIteration -lt $maxDrainIterations; $drainIteration++) {
+    $longPollDeadline = (Get-Date).AddSeconds($LongPollWindowSeconds)
+    # Garde dure anti-boucle-serree (backend qui repondrait immediatement en continu,
+    # ex. file d'ordres deja tentes ce cycle) : plafond tres au-dessus du regime nominal
+    # ou chaque requete vide bloque jusqu'a LongPollWaitSeconds cote serveur.
+    $maxIterations = 1000
+    for ($iteration = 0; $iteration -lt $maxIterations; $iteration++) {
+        # Temps restant dans la fenetre long-poll. En mode drainage pur
+        # (LongPollWindowSeconds=0) waitSec reste 0 : GET nu, aucune attente serveur.
+        $remainingSeconds = [int][Math]::Ceiling(($longPollDeadline - (Get-Date)).TotalSeconds)
+        if ($LongPollWindowSeconds -gt 0 -and $remainingSeconds -le 0) { break }
+        $waitSec = if ($LongPollWindowSeconds -gt 0) {
+            [Math]::Min($LongPollWaitSeconds, [Math]::Max(1, $remainingSeconds))
+        } else { 0 }
+
         $orders = @()
         try {
-            $ordersResp = Invoke-HephApi -Cfg $Cfg -Method Get -Path "/api/agent/orders"
+            # ?wait=<sec> (long-poll) uniquement s'il est actif : le backend garde alors
+            # la requete ouverte tant que la file est vide (jusqu'a waitSec) et repond
+            # des qu'un ordre existe. Path nu si waitSec=0 -> retro-compatible. Timeout
+            # client > waitSec (marge reseau) pour ne pas couper l'attente serveur.
+            $ordersPath = if ($waitSec -gt 0) { "/api/agent/orders?wait=$waitSec" } else { "/api/agent/orders" }
+            $ordersResp = Invoke-HephApi -Cfg $Cfg -Method Get -Path $ordersPath -TimeoutSec ($waitSec + 15)
             $orders = @($ordersResp.orders)
         } catch {
             Write-HephLog -LogPath $LogPath -Message "ERREUR GET /api/agent/orders: $($_.Exception.Message)"
@@ -410,7 +442,14 @@ function Invoke-HephAgentCycle {
             Where-Object { $_ -and $_.id -and -not $attemptedOrderIds.ContainsKey([string]$_.id) } |
             Select-Object -First 1
         if (-not $order) {
-            break
+            # Aucun ordre a traiter. Sans long-poll : fin du drainage (historique).
+            # Avec long-poll : reboucler jusqu'a la deadline -- si la file etait vide, le
+            # serveur a deja consomme le temps d'attente ; si elle ne contenait que des
+            # ordres deja tentes ce cycle (report de statut echoue), temporiser pour ne
+            # pas boucler serre (le serveur, lui, a repondu immediatement, file non vide).
+            if ($LongPollWindowSeconds -le 0) { break }
+            if (@($orders).Count -gt 0) { Start-Sleep -Seconds ([Math]::Max(1, $waitSec)) }
+            continue
         }
         $attemptedOrderIds[[string]$order.id] = $true
 
@@ -666,7 +705,11 @@ function Invoke-HephAgentCycleLocked {
 
         [int]$LockMaxAgeMinutes = 10,
 
-        [string]$ConfigPath = (Join-Path $PSScriptRoot "hephaestos-config.json")
+        [string]$ConfigPath = (Join-Path $PSScriptRoot "hephaestos-config.json"),
+
+        [int]$LongPollWindowSeconds = 0,
+
+        [int]$LongPollWaitSeconds = 30
     )
 
     if (-not (Test-HephLockFree -LockPath $LockPath -MaxAgeMinutes $LockMaxAgeMinutes -Now $Now)) {
@@ -690,7 +733,8 @@ function Invoke-HephAgentCycleLocked {
     Set-Content -LiteralPath $LockPath -Value $Now.ToString("o") -Force
 
     try {
-        Invoke-HephAgentCycle -Cfg $Cfg -Now $Now -LogPath $LogPath -LockPath $LockPath -ConfigPath $ConfigPath
+        Invoke-HephAgentCycle -Cfg $Cfg -Now $Now -LogPath $LogPath -LockPath $LockPath -ConfigPath $ConfigPath `
+            -LongPollWindowSeconds $LongPollWindowSeconds -LongPollWaitSeconds $LongPollWaitSeconds
     } finally {
         Remove-Item -LiteralPath $LockPath -ErrorAction SilentlyContinue
     }
@@ -699,5 +743,16 @@ function Invoke-HephAgentCycleLocked {
 if ($MyInvocation.InvocationName -ne ".") {
     $cfg = Get-HephConfig -Path $ConfigPath
     $lockPath = Join-Path $PSScriptRoot "hephaestos-agent.lock"
-    Invoke-HephAgentCycleLocked -Cfg $cfg -Now $Now -LogPath $LogPath -LockPath $lockPath -ConfigPath $ConfigPath
+    # Fenetre de long-poll (activation reactive), configurable via ssc-config.json
+    # (long_poll_window_seconds / long_poll_wait_seconds) sans re-deployer le script ;
+    # defaut 100s / 30s. Doit rester sous l'intervalle du tick planifie (2 min) --
+    # MultipleInstancesPolicy=IgnoreNew empeche le chevauchement, le tick suivant reprend.
+    $lpWindow = if ($cfg.PSObject.Properties.Name -contains "long_poll_window_seconds" -and $cfg.long_poll_window_seconds) {
+        [int]$cfg.long_poll_window_seconds
+    } else { 100 }
+    $lpWait = if ($cfg.PSObject.Properties.Name -contains "long_poll_wait_seconds" -and $cfg.long_poll_wait_seconds) {
+        [int]$cfg.long_poll_wait_seconds
+    } else { 30 }
+    Invoke-HephAgentCycleLocked -Cfg $cfg -Now $Now -LogPath $LogPath -LockPath $lockPath -ConfigPath $ConfigPath `
+        -LongPollWindowSeconds $lpWindow -LongPollWaitSeconds $lpWait
 }

@@ -998,3 +998,69 @@ Describe "Test-InAutoUpdateWindow" {
         Test-InAutoUpdateWindow -Window $null -Now (Get-Date "2026-07-13 05:15") | Should -Be $false
     }
 }
+
+Describe "Invoke-HephApi -- TimeoutSec" {
+    It "transmet TimeoutSec a Invoke-RestMethod" {
+        Mock Invoke-RestMethod { return [pscustomobject]@{ ok = $true } }
+        $cfg = [pscustomobject]@{ api_base = "http://x:8710"; agent_token = "t" }
+        Invoke-HephApi -Cfg $cfg -Method Get -Path "/api/agent/orders?wait=30" -TimeoutSec 45 | Out-Null
+        Should -Invoke Invoke-RestMethod -ParameterFilter { $TimeoutSec -eq 45 }
+    }
+
+    It "sans TimeoutSec explicite, applique un defaut fini (jamais d'attente infinie)" {
+        Mock Invoke-RestMethod { return [pscustomobject]@{ ok = $true } }
+        $cfg = [pscustomobject]@{ api_base = "http://x:8710"; agent_token = "t" }
+        Invoke-HephApi -Cfg $cfg -Method Post -Path "/api/agent/state" -Body @{ a = 1 } | Out-Null
+        Should -Invoke Invoke-RestMethod -ParameterFilter { $TimeoutSec -gt 0 }
+    }
+}
+
+Describe "Invoke-HephAgentCycle -- long-poll (activation reactive)" {
+    BeforeEach {
+        $script:cfg = New-TestCfg
+        $script:calls = @()
+        $script:orderQueue = @()
+        $script:getCount = 0
+
+        Mock Get-LocalBuildId { "100" }
+        Mock Get-Process { $null }
+        Mock Get-PalworldPlayers { [pscustomobject]@{ Count = 0; Players = @() } }
+        Mock Get-PublicBuildId { "100" }
+        Mock Send-KumaPush {}
+
+        Mock Invoke-HephApi {
+            $script:calls += [pscustomobject]@{ Method = $Method; Path = $Path; Body = $Body }
+            if ($Path -like "/api/agent/orders?*" -or $Path -eq "/api/agent/orders") {
+                $script:getCount++
+                # Simule un ordre cree par un clic admin APRES le 1er long-poll (file
+                # d'abord vide) : c'est exactement le scenario que la feature accelere.
+                if ($script:getCount -ge 2 -and @($script:orderQueue).Count -eq 0) {
+                    $script:orderQueue = @([pscustomobject]@{ id = "lp1"; server = "palworld"; type = "restart"; status = "pending"; created = "x"; detail = $null })
+                }
+                Start-Sleep -Milliseconds 50
+                return [pscustomobject]@{ orders = @($script:orderQueue | Where-Object { $_.status -in @("pending", "running") }) }
+            }
+            if ($Path -match "^/api/agent/orders/(.+)$") {
+                $target = $script:orderQueue | Where-Object { $_.id -eq $Matches[1] } | Select-Object -First 1
+                if ($target) { $target.status = $Body.status }
+                return [pscustomobject]@{ ok = $true }
+            }
+            return [pscustomobject]@{ ok = $true }
+        }
+    }
+
+    It "sans long-poll (window=0 par defaut) : n'utilise JAMAIS ?wait (retro-compat)" {
+        Invoke-HephAgentCycle -Cfg $script:cfg -Now (Get-Date "2026-07-13 12:00") -LogPath (Join-Path $TestDrive "lp.log")
+        @($script:calls | Where-Object { $_.Path -like "*wait=*" }).Count | Should -Be 0
+        @($script:calls | Where-Object { $_.Path -eq "/api/agent/orders" }).Count | Should -BeGreaterThan 0
+    }
+
+    It "long-poll actif : interroge /orders avec ?wait et traite un ordre survenu pendant la fenetre" {
+        Mock Restart-GameServer {}
+        Invoke-HephAgentCycle -Cfg $script:cfg -Now (Get-Date) -LogPath (Join-Path $TestDrive "lp.log") `
+            -LongPollWindowSeconds 3 -LongPollWaitSeconds 1
+        @($script:calls | Where-Object { $_.Path -like "*wait=*" }).Count | Should -BeGreaterThan 0
+        Should -Invoke Restart-GameServer -Times 1
+        @($script:calls | Where-Object { $_.Path -eq "/api/agent/orders/lp1" -and $_.Body.status -eq "done" }).Count | Should -Be 1
+    }
+}

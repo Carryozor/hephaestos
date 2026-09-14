@@ -393,3 +393,59 @@ def test_read_file_failed_does_not_touch_file_read(tmp_path):
     c.post(f"/api/agent/orders/{oid}", headers=AGT, json={"status": "failed", "detail": "trop gros"})
     reg = c.get("/api/servers/palworld/registry").json()
     assert "file_read" not in reg or reg["file_read"] is None
+
+
+# --- Long-poll GET /api/agent/orders (activation reactive, 14/09) ---
+
+def test_orders_wait_zero_returns_immediately(tmp_path):
+    """Retro-compat : sans ?wait (ou wait=0), le comportement est inchange --
+    retour immediat, file vide sans attente."""
+    import time
+
+    c = make_client(tmp_path)
+    t0 = time.monotonic()
+    r = c.get("/api/agent/orders", headers=AGT)
+    assert r.status_code == 200 and r.json()["orders"] == []
+    assert time.monotonic() - t0 < 0.5  # aucune attente
+
+
+def test_orders_long_poll_times_out_on_empty_queue(tmp_path, monkeypatch):
+    """wait>0 avec file vide : le handler attend puis retourne une file vide a
+    l'echeance (jamais de hang ni d'erreur)."""
+    import time
+
+    from app import routes_agent
+    monkeypatch.setattr(routes_agent, "LONG_POLL_INTERVAL_SECONDS", 0.02)
+    c = make_client(tmp_path)
+    t0 = time.monotonic()
+    r = c.get("/api/agent/orders?wait=1", headers=AGT)
+    elapsed = time.monotonic() - t0
+    assert r.status_code == 200 and r.json()["orders"] == []
+    assert 0.5 < elapsed < 3, elapsed  # a bien attendu ~1s, pas retourne tout de suite
+
+
+async def test_orders_long_poll_wakes_on_new_order(tmp_path, monkeypatch):
+    """Le cœur de la feature : un ordre cree pendant que l'agent long-polle doit
+    faire revenir le GET quasi immediatement (bien avant l'echeance wait)."""
+    import bcrypt
+    import httpx
+
+    from app import routes_agent
+    monkeypatch.setattr(routes_agent, "LONG_POLL_INTERVAL_SECONDS", 0.02)
+    app = make_app(tmp_path)
+    pwh = bcrypt.hashpw(b"testpass123", bcrypt.gensalt()).decode()
+    await app.state.store.create_user("tester", pwh)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.post("/api/login",
+                                  json={"username": "tester", "password": "testpass123"})).status_code == 200
+        loop = asyncio.get_event_loop()
+        t0 = loop.time()
+        poll = asyncio.create_task(client.get("/api/agent/orders?wait=5", headers=AGT))
+        await asyncio.sleep(0.1)  # laisse le long-poll s'installer sur une file vide
+        assert (await client.post("/api/servers/palworld/update")).status_code == 201
+        resp = await poll
+        elapsed = loop.time() - t0
+        assert elapsed < 3, elapsed  # revenu bien avant l'echeance de 5s
+        assert [o["type"] for o in resp.json()["orders"]] == ["update"]

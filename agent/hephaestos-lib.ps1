@@ -672,7 +672,12 @@ function Invoke-HephApi {
         [Parameter(Mandatory)]
         [string]$Path,
 
-        $Body = $null
+        $Body = $null,
+
+        # Timeout client explicite : sans lui, Invoke-RestMethod peut attendre
+        # indefiniment (aucun timeout par defaut cote PowerShell). Le long-poll passe
+        # une valeur > sa duree d'attente serveur ; les appels normaux gardent 30s.
+        [int]$TimeoutSec = 30
     )
 
     if (-not $Cfg.api_base) {
@@ -686,9 +691,10 @@ function Invoke-HephApi {
     $headers = @{ Authorization = "Bearer $($Cfg.agent_token)" }
 
     $params = @{
-        Uri     = $uri
-        Method  = $Method
-        Headers = $headers
+        Uri        = $uri
+        Method     = $Method
+        Headers    = $headers
+        TimeoutSec = $TimeoutSec
     }
 
     if ($null -ne $Body) {

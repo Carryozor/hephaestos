@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -17,6 +18,13 @@ router = APIRouter(prefix="/api/agent", dependencies=[Depends(require_agent)])
 # Protection croissance state.json : une entree config_servers/discovered_games venant
 # de l'agent (moins privilegie) est ignoree si sa serialisation JSON depasse ce seuil.
 AGENT_ENTRY_MAX_BYTES = 4096
+
+# Long-poll GET /orders : plafond dur du temps qu'on garde une requete agent ouverte
+# (l'agent boucle des long-polls plus courts, cf. hephaestos-agent.ps1) et pas de
+# scrutation de la file pendant l'attente. LONG_POLL_INTERVAL_SECONDS est surcharge a
+# une valeur minuscule par les tests pour ne pas attendre en temps reel.
+LONG_POLL_MAX_WAIT_SECONDS = 50
+LONG_POLL_INTERVAL_SECONDS = 1.0
 
 
 class OrderResult(BaseModel):
@@ -85,13 +93,30 @@ class StateReport(BaseModel):
 
 
 @router.get("/orders")
-async def get_orders(request: Request):
+async def get_orders(request: Request, wait: int = 0):
     await auto_enqueue_mod_updates(request)
     await auto_enqueue_game_updates(request)
     await auto_enqueue_crash_restarts(request)
     await refresh_all_bepinex_versions(request)
     store = request.app.state.store
     orders = await store.pending_orders()  # groom : peut expirer des ordres > 24h
+
+    # Long-poll (activation reactive) : si l'agent a passe ?wait=<sec> et que la file
+    # est vide, on garde la requete ouverte jusqu'a `wait` secondes (bornees), en
+    # re-verifiant la file toutes les LONG_POLL_INTERVAL_SECONDS -- un ordre cree par un
+    # clic admin est ainsi pris en ~1s au lieu d'attendre le prochain tick agent (2 min).
+    # L'attente est un simple `await sleep` : AUCUN verrou tenu, l'event loop reste libre
+    # pour le dashboard et les autres requetes. Les auto-enqueue ne sont evalues qu'une
+    # fois (au debut) -- un ordre AUTO apparu pendant l'attente sera pris au tick suivant,
+    # seule la reactivite des ordres MANUELS motive cette feature.
+    wait = max(0, min(wait, LONG_POLL_MAX_WAIT_SECONDS))
+    if not orders and wait > 0:
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + wait
+        while not orders and loop.time() < deadline:
+            await asyncio.sleep(min(LONG_POLL_INTERVAL_SECONDS, max(0.0, deadline - loop.time())))
+            orders = await store.pending_orders()
+
     expired = await store.pop_expired_unnotified()
     if expired:
         from app.notify import send_alert
