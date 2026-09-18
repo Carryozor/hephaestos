@@ -1018,8 +1018,19 @@ function Get-ValheimLogInfo {
         $version = $versionMatch.Matches[0].Groups[1].Value
         $network = $versionMatch.Matches[0].Groups[2].Value
 
+        # Bug reel corrige le 18/09/2026 : le format reel de cette ligne est
+        # "Got character ZDOID from <NomDePersonnage> : <id1>:<id2>" -- un NOM,
+        # jamais un SteamID numerique comme la doc communautaire (jamais verifiee
+        # contre une vraie connexion avant ce jour, cf. note ci-dessus) le laissait
+        # supposer. L'ancien pattern "from (\d+)" ne matchait donc AUCUNE ligne
+        # reelle : Count est reste a 0 en continu pendant 9 jours, invisible faute
+        # de connexion reelle pour l'exercer. SteamIds contient donc des noms de
+        # personnage, pas des SteamID64 -- dedup par nom (limite acceptee : deux
+        # joueurs avec le meme nom de personnage sous-compteraient, cas non
+        # rencontre et juge tres improbable face au bug precedent qui comptait
+        # TOUJOURS zero).
         $steamIds = [System.Collections.Generic.HashSet[string]]::new()
-        foreach ($match in (Select-String -LiteralPath $LogPath -Pattern "Got character ZDOID from (\d+)")) {
+        foreach ($match in (Select-String -LiteralPath $LogPath -Pattern "Got character ZDOID from (.+?) : ")) {
             [void]$steamIds.Add($match.Matches[0].Groups[1].Value)
         }
 

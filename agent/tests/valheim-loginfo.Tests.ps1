@@ -40,18 +40,25 @@ Describe "Get-ValheimLogInfo" {
         $result.SteamIds.Count | Should -Be 0
     }
 
-    It "compte les SteamID distincts vus (pas les doublons) via les lignes de jonction connues et les liste dans SteamIds" {
+    It "compte les joueurs distincts vus (pas les doublons) via les lignes de jonction reelles et les liste dans SteamIds" {
+        # Format REEL observe en prod le 18/09/2026 (1re vraie connexion depuis
+        # l'implementation du 09/09/2026) : le nom du personnage suit "from",
+        # PAS un SteamID numerique comme la doc communautaire le laissait supposer
+        # a l'epoque -- l'ancien regex "from (\d+)" ne matchait donc JAMAIS aucune
+        # ligne reelle, Count est reste a 0 en continu pendant 9 jours sans que
+        # personne ne le remarque (aucune connexion reelle pour l'exercer avant).
         @'
 09/09/2026 17:31:45: Console: Valheim 1.0.7 (network version 39)
-09/09/2026 17:35:02: Got character ZDOID from 76561198012345678 : 123:456
-09/09/2026 17:35:10: Got character ZDOID from 76561198012345678 : 123:457
-09/09/2026 17:40:00: Got character ZDOID from 76561198098765432 : 200:1
+09/18/2026 18:25:24: Got character ZDOID from PoukieBear : 3716332063:1
+09/18/2026 18:33:17: Got character ZDOID from Pouki : 2539237910:1
+09/18/2026 18:40:40: Got character ZDOID from PoukieBear : 0:0
+09/18/2026 18:40:40: Got character ZDOID from PoukieBear : 3716332063:2964
 '@ | Set-Content -LiteralPath $script:logPath -Encoding UTF8
 
         $result = Get-ValheimLogInfo -LogPath $script:logPath
         $result.Info | Should -Match "2 connexions"
         $result.Count | Should -Be 2
-        (@($result.SteamIds) | Sort-Object) -join "," | Should -Be "76561198012345678,76561198098765432"
+        (@($result.SteamIds) | Sort-Object) -join "," | Should -Be "Pouki,PoukieBear"
     }
 
     It "trouve la ligne de version meme apres des milliers de lignes suivantes (serveur up depuis longtemps)" {
