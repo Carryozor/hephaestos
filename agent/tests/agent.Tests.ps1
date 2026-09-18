@@ -679,9 +679,10 @@ Describe "Invoke-HephAgentCycle -- rcon_info via log console (repli Valheim)" {
         $cfg = New-TestCfgValheim -ConsoleLogPath "C:\steam\ssc-backups\valheim-console.log"
         Mock Get-ValheimLogInfo {
             [pscustomobject]@{
-                Info     = "Valheim 1.0.7 (network 39) - 2 connexions vue(s) depuis le demarrage"
-                Count    = 2
-                SteamIds = @("76561198012345678", "76561198098765432")
+                Info      = "Valheim 1.0.7 (network 39) - 2 connexions vue(s) depuis le demarrage"
+                Count     = 2
+                SteamIds  = @("76561198012345678", "76561198098765432")
+                LiveCount = 2
             }
         }
 
@@ -709,15 +710,34 @@ Describe "Invoke-HephAgentCycle -- rcon_info via log console (repli Valheim)" {
         $stateCall.Body.servers.valheim.players | Should -Be $null
     }
 
-    It "console_log_path configure mais Get-ValheimLogInfo ne trouve rien (Info/Count `$null) : rcon_info et players restent `$null, pas d'exception" {
+    It "console_log_path configure mais Get-ValheimLogInfo ne trouve rien (Info/Count/LiveCount `$null) : rcon_info et players restent `$null, pas d'exception" {
         $cfg = New-TestCfgValheim -ConsoleLogPath "C:\steam\ssc-backups\valheim-console.log"
-        Mock Get-ValheimLogInfo { [pscustomobject]@{ Info = $null; Count = $null; SteamIds = @() } }
+        Mock Get-ValheimLogInfo { [pscustomobject]@{ Info = $null; Count = $null; SteamIds = @(); LiveCount = $null } }
 
         { Invoke-HephAgentCycle -Cfg $cfg -Now (Get-Date "2026-09-09 17:05") -LogPath (Join-Path $TestDrive "agent-valheim.log") } | Should -Not -Throw
 
         $stateCall = $script:apiCallsValheim | Where-Object { $_.Path -eq "/api/agent/state" }
         $stateCall.Body.servers.valheim.rcon_info | Should -Be $null
         $stateCall.Body.servers.valheim.players | Should -Be $null
+    }
+
+    It "incident reel 18/09/2026 : LiveCount=0 pilote players=0 et vide players_list meme si Count (cumulatif) est encore > 0" {
+        $cfg = New-TestCfgValheim -ConsoleLogPath "C:\steam\ssc-backups\valheim-console.log"
+        Mock Get-ValheimLogInfo {
+            [pscustomobject]@{
+                Info      = "Valheim 1.0.15 (network 40) - 4 connexions vue(s) depuis le demarrage"
+                Count     = 4
+                SteamIds  = @("PoukieBear", "Pouki", "Feishino", "Blork")
+                LiveCount = 0
+            }
+        }
+
+        Invoke-HephAgentCycle -Cfg $cfg -Now (Get-Date "2026-09-18 20:35") -LogPath (Join-Path $TestDrive "agent-valheim.log")
+
+        $stateCall = $script:apiCallsValheim | Where-Object { $_.Path -eq "/api/agent/state" }
+        $srv = $stateCall.Body.servers.valheim
+        $srv.players | Should -Be 0
+        $srv.players_list | Should -BeNullOrEmpty
     }
 
     It "exception levee par Get-ValheimLogInfo : capturee, le cycle continue (etat + kuma s'executent quand meme)" {

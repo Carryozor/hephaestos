@@ -80,4 +80,37 @@ Describe "Get-ValheimLogInfo" {
         "" | Set-Content -LiteralPath $script:logPath -Encoding UTF8
         { Get-ValheimLogInfo -LogPath $script:logPath } | Should -Not -Throw
     }
+
+    It "LiveCount reflete le dernier 'now N player(s)' du moteur, PAS le total cumule des noms distincts vus" {
+        # Incident reel du 18/09/2026 : le dashboard affichait encore 4 joueurs
+        # (Count = noms de personnage distincts vus DEPUIS LE DEMARRAGE, ne peut
+        # que grandir, cf. note ci-dessus) alors que tout le monde etait
+        # deconnecte. Le vrai log contient DEJA un compteur live tenu par le
+        # moteur Valheim lui-meme dans les lignes "Player joined"/"Player
+        # connection lost" ("now N player(s)") -- jamais exploite avant ce jour
+        # (la note du 09/09/2026 supposait qu'aucun marqueur de deconnexion
+        # fiable n'existait, sans avoir observe de vraie session multi-joueurs
+        # avec deconnexions).
+        @'
+09/09/2026 17:31:45: Console: Valheim 1.0.7 (network version 39)
+09/18/2026 18:25:24: Got character ZDOID from PoukieBear : 3716332063:1
+09/18/2026 18:25:35: Player joined server "SSC-Valheim" that has join code 993333, now 2 player(s)
+09/18/2026 18:33:17: Got character ZDOID from Pouki : 2539237910:1
+09/18/2026 20:30:50: Player connection lost server "SSC-Valheim" that has join code 161140, now 1 player(s)
+09/18/2026 22:30:50: Player connection lost server "SSC-Valheim" that has join code 161140, now 0 player(s)
+'@ | Set-Content -LiteralPath $script:logPath -Encoding UTF8
+
+        $result = Get-ValheimLogInfo -LogPath $script:logPath
+        $result.Count | Should -Be 2  # noms distincts vus depuis le demarrage (info seulement)
+        $result.LiveCount | Should -Be 0  # personne connecte actuellement -- c'est ca qui doit piloter l'affichage
+    }
+
+    It "LiveCount vaut 0 (pas `$null) quand aucune ligne 'now N player' n'existe encore mais que le log est valide" {
+        @'
+09/09/2026 17:31:45: Console: Valheim 1.0.7 (network version 39)
+'@ | Set-Content -LiteralPath $script:logPath -Encoding UTF8
+
+        $result = Get-ValheimLogInfo -LogPath $script:logPath
+        $result.LiveCount | Should -Be 0
+    }
 }

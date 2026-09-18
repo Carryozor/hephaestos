@@ -209,15 +209,20 @@ function Send-HephStateReport {
                 # Repli pour les jeux sans RCON ni A2S exploitable (ex. Valheim, verifie
                 # le 09/09/2026 -- Get-A2sPlayerCount timeout meme en local) : rcon_info
                 # + comptage tires du meme log console redirige, un seul appel pour les
-                # deux. Count = connexions VUES depuis le demarrage, pas "en ligne" (cf.
-                # doc Get-ValheimLogInfo) -- affiche quand meme dans la colonne joueurs
-                # du dashboard, choix explicite de l'utilisateur le 09/09/2026.
+                # deux. Bug reel corrige le 18/09/2026 : $players pilotait sur Count
+                # (noms distincts vus depuis le demarrage, cumulatif, ne descend
+                # JAMAIS) -- affichait encore 4 joueurs alors que plus personne n'etait
+                # connecte. LiveCount (dernier "now N player(s)" du moteur, cf. doc
+                # Get-ValheimLogInfo) reflete l'etat reel. La liste nominative reste
+                # basee sur les noms cumulatifs vus (pas de tracking live par nom
+                # disponible dans ce log) mais est videe si LiveCount=0 pour eviter
+                # d'afficher des noms alors que le compteur affiche zero.
                 if ($processUp) {
                     try {
                         $logInfo = Get-ValheimLogInfo -LogPath ([string]$serverCfg.console_log_path)
                         if (-not $rconInfo) { $rconInfo = $logInfo.Info }
-                        $players = $logInfo.Count
-                        if ($null -ne $logInfo.Count) {
+                        $players = $logInfo.LiveCount
+                        if ($null -ne $logInfo.LiveCount -and $logInfo.LiveCount -gt 0) {
                             $playersList = @($logInfo.SteamIds | ForEach-Object {
                                 @{ id = $_; name = $_; steamid = $_ }
                             })

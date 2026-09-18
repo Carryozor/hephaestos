@@ -1004,7 +1004,7 @@ function Get-ValheimLogInfo {
         [string]$LogPath
     )
 
-    $empty = [pscustomobject]@{ Info = $null; Count = $null; SteamIds = @() }
+    $empty = [pscustomobject]@{ Info = $null; Count = $null; SteamIds = @(); LiveCount = $null }
 
     try {
         if (-not (Test-Path -LiteralPath $LogPath)) {
@@ -1037,7 +1037,23 @@ function Get-ValheimLogInfo {
         $count = $steamIds.Count
         $label = if ($count -le 1) { "connexion" } else { "connexions" }
         $info = "Valheim $version (network $network) - $count $label vue(s) depuis le demarrage"
-        return [pscustomobject]@{ Info = $info; Count = $count; SteamIds = @($steamIds) }
+
+        # Bug reel corrige le 18/09/2026 (meme journee que le fix ci-dessus) :
+        # le dashboard affichait un compteur de joueurs qui ne descendait jamais
+        # (Count = noms distincts vus depuis le demarrage, cumulatif par design),
+        # y compris quand plus personne n'etait connecte. Le moteur Valheim tient
+        # DEJA un compteur live dans les lignes "Player joined"/"Player connection
+        # lost" ("now N player(s)") -- jamais exploite avant ce jour (la note du
+        # 09/09/2026 ci-dessus supposait qu'aucun marqueur de deconnexion fiable
+        # n'existait, sans avoir observe de vraie session avec deconnexions
+        # reelles). LiveCount = dernier "now N" du fichier, 0 si aucune ligne
+        # (log valide mais personne n'a encore rejoint) -- c'est CE champ qui doit
+        # piloter l'affichage du nombre de joueurs, Count reste informatif
+        # (total de visiteurs distincts depuis le demarrage, dans Info).
+        $liveMatch = Select-String -LiteralPath $LogPath -Pattern "now (\d+) player\(s\)" | Select-Object -Last 1
+        $liveCount = if ($liveMatch) { [int]$liveMatch.Matches[0].Groups[1].Value } else { 0 }
+
+        return [pscustomobject]@{ Info = $info; Count = $count; SteamIds = @($steamIds); LiveCount = $liveCount }
     } catch {
         return $empty
     }
