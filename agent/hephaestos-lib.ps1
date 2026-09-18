@@ -2180,7 +2180,17 @@ function Copy-BepInExPayload {
     if ($Target -eq "plugins") {
         $pluginsSrc = Join-Path $ExtractedDir "plugins"
         if (-not (Test-Path -LiteralPath $pluginsSrc)) {
-            throw "Copy-BepInExPayload: dossier 'plugins' absent du package '${Package}'"
+            # Repli : certains packages Thunderstore (ex. ValheimPlus_Grantapher_Temporary,
+            # verifie sur le vrai zip le 18/09/2026) wrappent leur payload sous
+            # BepInEx/plugins/ au lieu d'un dossier plugins/ a la racine du zip --
+            # les deux conventions coexistent chez differents auteurs, aucune n'est
+            # universelle malgre le commentaire initial de cette fonction.
+            $nestedSrc = Join-Path $ExtractedDir "BepInEx\plugins"
+            if (Test-Path -LiteralPath $nestedSrc) {
+                $pluginsSrc = $nestedSrc
+            } else {
+                throw "Copy-BepInExPayload: dossier 'plugins' absent du package '${Package}'"
+            }
         }
         $pluginsDest = Join-Path $ServerDir "BepInEx\plugins"
         New-Item -ItemType Directory -Path $pluginsDest -Force | Out-Null

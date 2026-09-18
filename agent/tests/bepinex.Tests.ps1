@@ -167,6 +167,19 @@ Describe "Copy-BepInExPayload" {
         { Copy-BepInExPayload -ExtractedDir $extractDir -ServerDir $serverDir -Target "plugins" -Package "X" } | Should -Throw
     }
 
+    It "target plugins : repli sur BepInEx/plugins/ si pas de plugins/ a la racine (ValheimPlus Grantapher, verifie sur le vrai zip Thunderstore le 18/09)" {
+        $serverDir = Join-Path $TestDrive "server-plugins-nested-bepinex"
+        New-Item -ItemType Directory -Path $serverDir -Force | Out-Null
+        $extractDir = Join-Path $script:extractRoot "valheimplus"
+        New-Item -ItemType Directory -Path (Join-Path $extractDir "BepInEx\plugins") -Force | Out-Null
+        "dll" | Set-Content -LiteralPath (Join-Path $extractDir "BepInEx\plugins\ValheimPlus.dll")
+
+        $paths = Copy-BepInExPayload -ExtractedDir $extractDir -ServerDir $serverDir -Target "plugins" -Package "ValheimPlus_Grantapher_Temporary"
+
+        Test-Path (Join-Path $serverDir "BepInEx\plugins\ValheimPlus.dll") | Should -BeTrue
+        $paths | Should -Contain "BepInEx/plugins/ValheimPlus.dll"
+    }
+
     It "target root : copie BepInEx/core + winhttp.dll + doorstop_config.ini SANS toucher BepInEx/plugins existant" {
         $serverDir = Join-Path $TestDrive "server-root"
         New-Item -ItemType Directory -Path (Join-Path $serverDir "BepInEx\plugins") -Force | Out-Null
