@@ -183,6 +183,20 @@ async def report_order(request: Request, order_id: str, result: OrderResult):
                 logging.getLogger(__name__).warning(
                     "update_bepinex_mods [%s]: entree bepinex_installed ignoree (invalide): %r",
                     order["server"], entry)
+        # Filet de securite (incident du 18/09/2026, root cause jamais reproduite
+        # avec certitude malgre investigation approfondie) : un ordre rapporte
+        # "done" dont le contenu REEL du store ne correspond pas a la version
+        # demandee doit etre visible, jamais silencieux -- sans ca le dashboard
+        # peut mentir indefiniment sur l'etat reel des mods installes.
+        current = await request.app.state.store.bepinex.all(order["server"])
+        drifted = [m["slug"] for m in (order.get("mods") or [])
+                  if (current.get(m["slug"]) or {}).get("installed_version") != m.get("version")]
+        if drifted:
+            from app.notify import send_alert
+            await send_alert(request.app,
+                f"⚠️ Hephaestos [{order['server']}] MAJ BepInEx rapportee 'done' mais version(s) "
+                f"non persistee(s) dans le suivi : {', '.join(drifted)} -- verifier manuellement "
+                f"(le fichier sur le serveur peut deja etre a jour, seul le suivi affiche est en doute)")
     if order["status"] == "failed":
         # sans ca, un echec (steamcmd auth expiree, restore rate...) reste invisible
         # tant que personne n'ouvre le dashboard

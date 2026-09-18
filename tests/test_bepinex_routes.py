@@ -25,11 +25,16 @@ VALHEIM_MODS_SEED = {
 }
 
 
-def make_app(tmp_path, handler=None):
+def make_app(tmp_path, handler=None, alert_webhook=None, alert_captured=None):
     from app import bepinex as bepinex_service
     bepinex_service._latest_refreshed_at.clear()
 
     def default_handler(request):
+        url = str(request.url)
+        if alert_captured is not None and "hooks.example" in url:
+            import json as _json
+            alert_captured.append({"url": url, "body": _json.loads(request.content.decode())})
+            return httpx.Response(200, json={"ok": True})
         return httpx.Response(200, json={"latest": {
             "version_number": "2.31.0",
             "download_url": "https://thunderstore.io/package/download/ValheimModding/Jotunn/2.31.0/",
@@ -41,12 +46,14 @@ def make_app(tmp_path, handler=None):
         servers={"valheim": {"display_name": "Valheim", "server_appid": 896660},
                  "palworld": {"display_name": "Palworld", "server_appid": 2394010}},
         bepinex_mods=VALHEIM_MODS_SEED,
+        alert_webhook=alert_webhook,
     )
     return create_app(settings, http_client=client)
 
 
-def make_logged_in_client(tmp_path, handler=None, role="admin", servers=None, username="tester"):
-    app = make_app(tmp_path, handler=handler)
+def make_logged_in_client(tmp_path, handler=None, role="admin", servers=None, username="tester",
+                          alert_webhook=None, alert_captured=None):
+    app = make_app(tmp_path, handler=handler, alert_webhook=alert_webhook, alert_captured=alert_captured)
     password_hash = bcrypt.hashpw(b"testpass123", bcrypt.gensalt()).decode()
     asyncio.run(app.state.store.create_user(username, password_hash, role=role, servers=servers or []))
     client = TestClient(app)
@@ -227,3 +234,53 @@ def test_agent_report_failed_does_not_touch_installed_version(tmp_path):
     })
     entries = asyncio.run(app.state.store.bepinex.all("valheim"))
     assert entries["ValheimModding/Jotunn"]["installed_version"] == "2.30.0"
+
+
+def test_agent_report_done_but_installed_version_not_updated_triggers_alert(tmp_path):
+    """Incident reel du 18/09/2026 : l'agent a rapporte 'done' (detail correct,
+    3 mods listes) sur update_bepinex_mods, mais installed_version n'a PAS ete
+    persiste pour ces mods -- root cause jamais reproduite avec certitude malgre
+    une investigation approfondie (le meme payload rejoue manuellement fonctionne
+    a chaque fois). Filet de securite : un rapport 'done' dont le contenu reel du
+    store ne correspond pas a la version demandee par l'ordre doit etre visible
+    (alerte webhook), jamais silencieux -- l'agent est une source non fiable (P5/P6),
+    et un ecart ici laisse le dashboard mentir indefiniment sur l'etat reel des mods."""
+    captured = []
+    app, client = make_logged_in_client(
+        tmp_path, alert_webhook="https://hooks.example/ts-webhook/hephaestos", alert_captured=captured)
+    set_latest(app, "valheim", "ValheimModding/Jotunn")
+    oid = client.post("/api/servers/valheim/bepinex/update", json={}).json()["id"]
+
+    # bepinex_installed vide malgre un statut "done" -- reproduit la classe du
+    # bug observe (rapport de succes sans le contenu attendu), quelle qu'en soit
+    # la cause reelle chez l'agent.
+    r = client.post(f"/api/agent/orders/{oid}", headers=AGT, json={
+        "status": "done", "detail": "mise a jour reussie: ValheimModding/Jotunn -> 2.31.0",
+        "bepinex_installed": [],
+    })
+    assert r.status_code == 200
+
+    entries = asyncio.run(app.state.store.bepinex.all("valheim"))
+    assert entries["ValheimModding/Jotunn"]["installed_version"] == "2.30.0"
+
+    assert len(captured) == 1
+    body = captured[0]["body"]["content"]
+    assert "valheim" in body and "ValheimModding/Jotunn" in body
+
+
+def test_agent_report_done_with_matching_installed_version_triggers_no_alert(tmp_path):
+    """Non-regression : le chemin nominal (deja teste plus haut) ne doit pas
+    declencher l'alerte de derive ajoutee ci-dessus."""
+    captured = []
+    app, client = make_logged_in_client(
+        tmp_path, alert_webhook="https://hooks.example/ts-webhook/hephaestos", alert_captured=captured)
+    set_latest(app, "valheim", "ValheimModding/Jotunn")
+    oid = client.post("/api/servers/valheim/bepinex/update", json={}).json()["id"]
+
+    r = client.post(f"/api/agent/orders/{oid}", headers=AGT, json={
+        "status": "done", "detail": "mise a jour reussie",
+        "bepinex_installed": [{"slug": "ValheimModding/Jotunn", "version": "2.31.0",
+                               "paths": ["BepInEx/plugins/Jotunn.dll", "BepInEx/plugins/Jotunn.xml"]}],
+    })
+    assert r.status_code == 200
+    assert captured == []
