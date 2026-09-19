@@ -2216,7 +2216,21 @@ function Copy-BepInExPayload {
             if (Test-Path -LiteralPath $nestedSrc) {
                 $pluginsSrc = $nestedSrc
             } else {
-                throw "Copy-BepInExPayload: dossier 'plugins' absent du package '${Package}'"
+                # 3e convention (PlantEverything, verifie sur le vrai zip Thunderstore
+                # le 19/09/2026) : la/les DLL directement a la racine du zip, a cote de
+                # manifest.json/README/icon/CHANGELOG. Seuls les .dll racine sont
+                # copies -- jamais les fichiers de metadonnees du package.
+                $rootDlls = @(Get-ChildItem -LiteralPath $ExtractedDir -File -Filter "*.dll")
+                if ($rootDlls.Count -eq 0) {
+                    throw "Copy-BepInExPayload: dossier 'plugins' absent du package '${Package}'"
+                }
+                $rootDest = Join-Path $ServerDir "BepInEx\plugins"
+                New-Item -ItemType Directory -Path $rootDest -Force | Out-Null
+                foreach ($dll in $rootDlls) {
+                    Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $rootDest $dll.Name) -Force
+                    $written.Add("BepInEx/plugins/$($dll.Name)")
+                }
+                return @($written)
             }
         }
         $pluginsDest = Join-Path $ServerDir "BepInEx\plugins"
@@ -2364,13 +2378,16 @@ function Restore-BepInExBackup {
     <#
     .SYNOPSIS
         Restaure un backup Backup-BepInExState par-dessus le dossier serveur
-        (ecrase les fichiers en conflit). Limite connue et acceptee : un fichier
-        ajoute par un mod du LOT qui a reussi avant qu'un AUTRE mod du meme lot
-        n'echoue ne sera pas supprime par cette restauration (Expand-Archive
-        n'efface jamais, il ecrase seulement) -- reste un fichier orphelin
-        inoffensif, pas un plugin qui charge en double (les mods qui reussissent
-        legitimement remplacent deja leurs propres anciens fichiers via
-        Remove-BepInExPaths avant copie).
+        (ecrase les fichiers en conflit). BepInEx/plugins est PURGE avant
+        extraction : Expand-Archive n'efface jamais, et un fichier pose par une MAJ
+        partielle pouvait survivre a la restauration. Ce n'etait pas inoffensif :
+        quand un mod change de layout (dossier BepInEx/plugins/EpicLoot/ installe
+        a la main -> DLL a plat posee par la MAJ, cf. Copy-BepInExPayload), la
+        restauration remettait l'ancien dossier SANS retirer la copie a plat, donc
+        la meme DLL deux fois (double GUID BepInEx). Le backup contient tout
+        BepInEx/ : la purge de plugins/ ne perd rien qu'il ne restaure. Si
+        l'extraction echoue apres la purge, l'exception remonte (rollback en echec
+        signale a l'appelant) et le zip reste sur disque.
     #>
     param(
         [Parameter(Mandatory)] [string]$BackupZipPath,
@@ -2378,6 +2395,10 @@ function Restore-BepInExBackup {
     )
     if (-not (Test-Path -LiteralPath $BackupZipPath)) {
         throw "Restore-BepInExBackup: backup introuvable: ${BackupZipPath}"
+    }
+    $pluginsDir = Join-Path $ServerDir "BepInEx\plugins"
+    if (Test-Path -LiteralPath $pluginsDir) {
+        Remove-Item -LiteralPath $pluginsDir -Recurse -Force
     }
     Expand-Archive -LiteralPath $BackupZipPath -DestinationPath $ServerDir -Force
 }

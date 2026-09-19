@@ -167,6 +167,22 @@ Describe "Copy-BepInExPayload" {
         { Copy-BepInExPayload -ExtractedDir $extractDir -ServerDir $serverDir -Target "plugins" -Package "X" } | Should -Throw
     }
 
+    It "target plugins : repli sur les .dll a la racine du zip (PlantEverything, verifie sur le vrai zip Thunderstore le 19/09) sans copier manifest/README/icon/CHANGELOG" {
+        $serverDir = Join-Path $TestDrive "server-plugins-rootdll"
+        New-Item -ItemType Directory -Path $serverDir -Force | Out-Null
+        $extractDir = Join-Path $script:extractRoot "planteverything"
+        New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+        foreach ($f in "Advize_PlantEverything.dll", "manifest.json", "README.md", "CHANGELOG.md", "icon.png") {
+            "x" | Set-Content -LiteralPath (Join-Path $extractDir $f)
+        }
+
+        $paths = Copy-BepInExPayload -ExtractedDir $extractDir -ServerDir $serverDir -Target "plugins" -Package "PlantEverything"
+
+        Test-Path (Join-Path $serverDir "BepInEx\plugins\Advize_PlantEverything.dll") | Should -BeTrue
+        @($paths) | Should -Be @("BepInEx/plugins/Advize_PlantEverything.dll")
+        (Get-ChildItem -LiteralPath (Join-Path $serverDir "BepInEx\plugins")).Count | Should -Be 1
+    }
+
     It "target plugins : repli sur BepInEx/plugins/ si pas de plugins/ a la racine (ValheimPlus Grantapher, verifie sur le vrai zip Thunderstore le 18/09)" {
         $serverDir = Join-Path $TestDrive "server-plugins-nested-bepinex"
         New-Item -ItemType Directory -Path $serverDir -Force | Out-Null
@@ -435,6 +451,26 @@ Describe "Backup-BepInExState / Restore-BepInExBackup" {
 
         Get-Content -LiteralPath (Join-Path $serverDir "BepInEx\plugins\Jotunn.dll") | Should -Be "jotunn-v1"
         Get-Content -LiteralPath (Join-Path $serverDir "winhttp.dll") | Should -Be "winhttp-v1"
+    }
+
+    It "Restore-BepInExBackup supprime les fichiers de BepInEx/plugins ajoutes apres le backup (changement de layout dossier -> a plat : sinon la meme DLL se retrouve en double)" {
+        $serverDir = Join-Path $TestDrive "restore-purge-server"
+        New-BepinexServerDir -Root $serverDir
+        New-Item -ItemType Directory -Path (Join-Path $serverDir "BepInEx\plugins\EpicLoot") -Force | Out-Null
+        "epicloot-folder" | Set-Content -LiteralPath (Join-Path $serverDir "BepInEx\plugins\EpicLoot\EpicLoot.dll")
+        $cfg = [pscustomobject]@{ steamcmd_root = (Join-Path $TestDrive "restore-purge-steam") }
+        $serverCfg = [pscustomobject]@{ name = "valheim" }
+        $zipPath = Backup-BepInExState -Cfg $cfg -ServerCfg $serverCfg -ServerDir $serverDir
+
+        # MAJ partielle : ancien dossier supprime, nouvelle copie a plat posee, puis echec du lot
+        Remove-Item -LiteralPath (Join-Path $serverDir "BepInEx\plugins\EpicLoot") -Recurse -Force
+        "epicloot-flat" | Set-Content -LiteralPath (Join-Path $serverDir "BepInEx\plugins\EpicLoot.dll")
+
+        Restore-BepInExBackup -BackupZipPath $zipPath -ServerDir $serverDir
+
+        Get-Content -LiteralPath (Join-Path $serverDir "BepInEx\plugins\EpicLoot\EpicLoot.dll") | Should -Be "epicloot-folder"
+        Test-Path (Join-Path $serverDir "BepInEx\plugins\EpicLoot.dll") | Should -BeFalse
+        Get-Content -LiteralPath (Join-Path $serverDir "BepInEx\plugins\Jotunn.dll") | Should -Be "jotunn-v1"
     }
 
     It "Restore-BepInExBackup leve une exception explicite si le zip est introuvable" {
