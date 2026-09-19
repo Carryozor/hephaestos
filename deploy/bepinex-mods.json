@@ -55,6 +55,39 @@
       "log_plugin_name": "XPortal",
       "installed_version": "1.2.25",
       "installed_paths": ["BepInEx/plugins/XPortal"]
+    },
+    {
+      "slug": "RandyKnapp/EpicLoot",
+      "title": "Epic Loot",
+      "source": "thunderstore",
+      "owner": "RandyKnapp",
+      "package": "EpicLoot",
+      "target": "plugins",
+      "log_plugin_name": "Epic Loot",
+      "installed_version": "0.14.10",
+      "installed_paths": ["BepInEx/plugins/EpicLoot"]
+    },
+    {
+      "slug": "ValheimModding/JsonDotNET",
+      "title": "JsonDotNET",
+      "source": "thunderstore",
+      "owner": "ValheimModding",
+      "package": "JsonDotNET",
+      "target": "plugins",
+      "log_plugin_name": "Newtonsoft.Json Detector",
+      "installed_version": "13.0.4",
+      "installed_paths": ["BepInEx/plugins/JsonDotNET"]
+    },
+    {
+      "slug": "Advize/PlantEverything",
+      "title": "Plant Everything",
+      "source": "thunderstore",
+      "owner": "Advize",
+      "package": "PlantEverything",
+      "target": "plugins",
+      "log_plugin_name": "PlantEverything",
+      "installed_version": "1.21.2",
+      "installed_paths": ["BepInEx/plugins/Advize_PlantEverything.dll"]
     }
   ]
 }

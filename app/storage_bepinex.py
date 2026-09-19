@@ -43,51 +43,63 @@ class BepInExRepository:
     def __init__(self, store):
         self._store = store
 
-    def seed_if_empty(self, seed: dict[str, list[dict]]) -> None:
-        """Seed one-shot PAR SERVEUR (pas global comme ServersRepository) : un
-        serveur deja present dans bepinex_mods n'est jamais re-seede, mais un
-        nouveau serveur ajoute au seed plus tard (nouveau jeu module) l'est bien
-        -- appele de facon synchrone dans create_app, avant de servir."""
+    def seed_missing(self, seed: dict[str, list[dict]]) -> None:
+        """Complete le registre PAR SERVEUR et PAR SLUG : un mod deja suivi n'est
+        jamais re-seede (son etat -- latest_version, installed_version... -- est
+        conserve), mais un mod ajoute au catalogue apres le premier seed d'un
+        serveur deja en prod, comme un nouveau serveur, l'est bien. Aucune
+        suppression de mod n'existe, donc un slug absent du registre est toujours
+        un ajout legitime, jamais un mod retire a la main. Les nouvelles entrees
+        sont validees et construites AVANT d'etre fusionnees : une validation en
+        echec ne laisse rien de partiel dans le registre. Appele de facon
+        synchrone dans create_app, avant de servir."""
         data = self._store._load()
         bucket = data.setdefault("bepinex_mods", {})
-        changed = False
+        now = datetime.now(UTC).isoformat()
+        additions: dict[str, dict[str, dict]] = {}
         for server, mod_list in seed.items():
-            if server in bucket:
-                continue
-            now = datetime.now(UTC).isoformat()
-            entries = {}
+            known = bucket.get(server, {})
+            new_entries = {}
             for m in mod_list:
+                if m["slug"] in known:
+                    continue
                 validate_installed_paths(m.get("installed_paths", []), m["target"])
-                entries[m["slug"]] = {
-                    "slug": m["slug"],
-                    "title": m["title"],
-                    "source": m["source"],
-                    "owner": m["owner"],
-                    "package": m["package"],
-                    "asset_pattern": m.get("asset_pattern"),
-                    "tag_prefix": m.get("tag_prefix"),
-                    "target": m["target"],
-                    # Nom EXACT attendu dans une ligne "Loading [<Nom> <version>]" de
-                    # BepInEx/LogOutput.log -- distinct a la fois de `package` (slug
-                    # Thunderstore, ex. "ValheimPlus_Grantapher_Temporary" affiche
-                    # "Valheim Plus") et de `title` (ex. "Jötunn" affiche "Jotunn" sans
-                    # accent) : verifie empiriquement le 12/09/2026, aucun des deux
-                    # autres champs ne matche de façon fiable. None pour target="root"
-                    # (le pack BepInEx lui-meme n'apparait jamais dans cette liste).
-                    "log_plugin_name": m.get("log_plugin_name"),
-                    "installed_version": m["installed_version"],
-                    "plugin_version": None,
-                    "installed_paths": list(m.get("installed_paths", [])),
-                    "installed_at": now,
-                    "latest_version": None,
-                    "download_url": None,
-                    "latest_checked_at": None,
-                    "last_error": None,
-                }
-            bucket[server] = entries
-            changed = True
-        if changed:
+                new_entries[m["slug"]] = self._seed_entry(m, now)
+            if new_entries:
+                additions[server] = new_entries
+        for server, new_entries in additions.items():
+            bucket.setdefault(server, {}).update(new_entries)
+        if additions:
             self._store._dump(data)
+
+    @staticmethod
+    def _seed_entry(m: dict, now: str) -> dict:
+        return {
+            "slug": m["slug"],
+            "title": m["title"],
+            "source": m["source"],
+            "owner": m["owner"],
+            "package": m["package"],
+            "asset_pattern": m.get("asset_pattern"),
+            "tag_prefix": m.get("tag_prefix"),
+            "target": m["target"],
+            # Nom EXACT attendu dans une ligne "Loading [<Nom> <version>]" de
+            # BepInEx/LogOutput.log -- distinct a la fois de `package` (slug
+            # Thunderstore, ex. "ValheimPlus_Grantapher_Temporary" affiche
+            # "Valheim Plus") et de `title` (ex. "Jötunn" affiche "Jotunn" sans
+            # accent) : verifie empiriquement le 12/09/2026, aucun des deux
+            # autres champs ne matche de façon fiable. None pour target="root"
+            # (le pack BepInEx lui-meme n'apparait jamais dans cette liste).
+            "log_plugin_name": m.get("log_plugin_name"),
+            "installed_version": m["installed_version"],
+            "plugin_version": None,
+            "installed_paths": list(m.get("installed_paths", [])),
+            "installed_at": now,
+            "latest_version": None,
+            "download_url": None,
+            "latest_checked_at": None,
+            "last_error": None,
+        }
 
     async def all(self, server: str) -> dict:
         async with self._store._lock:

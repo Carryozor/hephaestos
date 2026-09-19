@@ -33,9 +33,9 @@ def make_store(tmp_path):
     return Store(tmp_path / "state.json")
 
 
-async def test_seed_if_empty_creates_entries(tmp_path):
+async def test_seed_creates_entries(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty(VALHEIM_SEED)
+    store.bepinex.seed_missing(VALHEIM_SEED)
     entries = await store.bepinex.all("valheim")
     assert set(entries) == {
         "denikson/BepInExPack_Valheim", "ValheimModding/Jotunn", "SpikeHimself/XPortal",
@@ -48,28 +48,28 @@ async def test_seed_if_empty_creates_entries(tmp_path):
     assert jotunn["installed_paths"] == ["BepInEx/plugins/Jotunn.dll", "BepInEx/plugins/Jotunn.xml"]
 
 
-async def test_seed_if_empty_is_idempotent(tmp_path):
+async def test_seed_is_idempotent(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty(VALHEIM_SEED)
+    store.bepinex.seed_missing(VALHEIM_SEED)
     await store.bepinex.set_latest("valheim", "ValheimModding/Jotunn", version="2.31.0",
                                    download_url="https://x/y.zip")
-    store.bepinex.seed_if_empty(VALHEIM_SEED)  # 2e appel : ne doit pas ecraser
+    store.bepinex.seed_missing(VALHEIM_SEED)  # 2e appel : ne doit pas ecraser
     entries = await store.bepinex.all("valheim")
     assert entries["ValheimModding/Jotunn"]["latest_version"] == "2.31.0"
 
 
-async def test_seed_if_empty_noop_on_empty_seed(tmp_path):
+async def test_seed_noop_on_empty_seed(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty({})
+    store.bepinex.seed_missing({})
     assert await store.bepinex.all("valheim") == {}
 
 
 async def test_seed_adds_new_server_without_touching_existing(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty(VALHEIM_SEED)
+    store.bepinex.seed_missing(VALHEIM_SEED)
     await store.bepinex.set_latest("valheim", "ValheimModding/Jotunn", version="2.31.0",
                                    download_url="https://x/y.zip")
-    store.bepinex.seed_if_empty({**VALHEIM_SEED, "otherserver": [
+    store.bepinex.seed_missing({**VALHEIM_SEED, "otherserver": [
         {"slug": "a/b", "title": "T", "source": "thunderstore", "owner": "a", "package": "b",
          "target": "plugins", "installed_version": "1.0.0", "installed_paths": ["BepInEx/plugins/b.dll"]},
     ]})
@@ -77,9 +77,79 @@ async def test_seed_adds_new_server_without_touching_existing(tmp_path):
     assert "a/b" in await store.bepinex.all("otherserver")
 
 
+async def test_seed_adds_missing_slug_to_existing_server_without_touching_others(tmp_path):
+    """Mod ajoute au catalogue apres le seed initial d'un serveur deja en prod :
+    il doit apparaitre, sans ecraser l'etat (latest_version, installed_version) des
+    entrees deja suivies."""
+    store = make_store(tmp_path)
+    store.bepinex.seed_missing(VALHEIM_SEED)
+    await store.bepinex.set_latest("valheim", "ValheimModding/Jotunn", version="2.31.0",
+                                   download_url="https://x/y.zip")
+    await store.bepinex.set_installed("valheim", "ValheimModding/Jotunn", version="2.30.1",
+                                      paths=["BepInEx/plugins/Jotunn.dll"])
+    extended = {"valheim": VALHEIM_SEED["valheim"] + [
+        {"slug": "RandyKnapp/EpicLoot", "title": "Epic Loot", "source": "thunderstore",
+         "owner": "RandyKnapp", "package": "EpicLoot", "target": "plugins",
+         "log_plugin_name": "Epic Loot", "installed_version": "0.14.10",
+         "installed_paths": ["BepInEx/plugins/EpicLoot"]},
+    ]}
+    store.bepinex.seed_missing(extended)
+    entries = await store.bepinex.all("valheim")
+    assert entries["RandyKnapp/EpicLoot"]["installed_version"] == "0.14.10"
+    assert entries["RandyKnapp/EpicLoot"]["log_plugin_name"] == "Epic Loot"
+    assert entries["ValheimModding/Jotunn"]["latest_version"] == "2.31.0"
+    assert entries["ValheimModding/Jotunn"]["installed_version"] == "2.30.1"
+    assert entries["ValheimModding/Jotunn"]["installed_paths"] == ["BepInEx/plugins/Jotunn.dll"]
+
+
+async def test_seed_missing_slug_still_validates_installed_paths(tmp_path):
+    store = make_store(tmp_path)
+    store.bepinex.seed_missing(VALHEIM_SEED)
+    bad = {"valheim": VALHEIM_SEED["valheim"] + [
+        {"slug": "a/b", "title": "T", "source": "thunderstore", "owner": "a", "package": "b",
+         "target": "plugins", "installed_version": "1.0.0",
+         "installed_paths": ["BepInEx/plugins/../../evil.dll"]},
+    ]}
+    with pytest.raises(ValueError):
+        store.bepinex.seed_missing(bad)
+    assert "a/b" not in await store.bepinex.all("valheim")
+
+
+async def test_seed_missing_invalid_entry_leaves_no_partial_state_across_servers(tmp_path):
+    """Une entree valide traitee AVANT une entree invalide (meme serveur ou autre
+    serveur) ne doit pas etre persistee : validation complete avant fusion."""
+    store = make_store(tmp_path)
+    store.bepinex.seed_missing(VALHEIM_SEED)
+    good = {"slug": "good/mod", "title": "G", "source": "thunderstore", "owner": "good",
+            "package": "mod", "target": "plugins", "installed_version": "1.0.0",
+            "installed_paths": ["BepInEx/plugins/good.dll"]}
+    bad = {"slug": "a/b", "title": "T", "source": "thunderstore", "owner": "a", "package": "b",
+           "target": "plugins", "installed_version": "1.0.0",
+           "installed_paths": ["BepInEx/plugins/../../evil.dll"]}
+    with pytest.raises(ValueError):
+        store.bepinex.seed_missing({"valheim": VALHEIM_SEED["valheim"] + [good],
+                                    "other": [good, bad]})
+    assert "good/mod" not in await store.bepinex.all("valheim")
+    assert await store.bepinex.all("other") == {}
+
+
+async def test_seed_missing_added_entry_is_not_overwritten_by_next_seed(tmp_path):
+    store = make_store(tmp_path)
+    store.bepinex.seed_missing(VALHEIM_SEED)
+    extra = {"slug": "RandyKnapp/EpicLoot", "title": "Epic Loot", "source": "thunderstore",
+             "owner": "RandyKnapp", "package": "EpicLoot", "target": "plugins",
+             "installed_version": "0.14.10", "installed_paths": ["BepInEx/plugins/EpicLoot"]}
+    extended = {"valheim": VALHEIM_SEED["valheim"] + [extra]}
+    store.bepinex.seed_missing(extended)
+    await store.bepinex.set_latest("valheim", "RandyKnapp/EpicLoot", version="0.15.0",
+                                   download_url="https://x/e.zip")
+    store.bepinex.seed_missing(extended)
+    assert (await store.bepinex.all("valheim"))["RandyKnapp/EpicLoot"]["latest_version"] == "0.15.0"
+
+
 async def test_all_empty_for_unknown_server(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty(VALHEIM_SEED)
+    store.bepinex.seed_missing(VALHEIM_SEED)
     assert await store.bepinex.all("palworld") == {}
 
 
@@ -91,7 +161,7 @@ async def test_seed_rejects_traversal_in_installed_paths(tmp_path):
          "installed_paths": ["BepInEx/plugins/../../evil.dll"]},
     ]}
     with pytest.raises(ValueError):
-        store.bepinex.seed_if_empty(bad_seed)
+        store.bepinex.seed_missing(bad_seed)
 
 
 async def test_seed_rejects_root_path_outside_fixed_allowlist(tmp_path):
@@ -107,12 +177,12 @@ async def test_seed_rejects_root_path_outside_fixed_allowlist(tmp_path):
          "installed_paths": ["BepInEx/plugins/sournois.dll"]},
     ]}
     with pytest.raises(ValueError):
-        store.bepinex.seed_if_empty(bad_seed)
+        store.bepinex.seed_missing(bad_seed)
 
 
 async def test_seed_accepts_known_root_paths(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty(VALHEIM_SEED)  # deja BepInExPack_Valheim en target=root
+    store.bepinex.seed_missing(VALHEIM_SEED)  # deja BepInExPack_Valheim en target=root
     entries = await store.bepinex.all("valheim")
     assert entries["denikson/BepInExPack_Valheim"]["installed_paths"] == [
         "BepInEx/core", "winhttp.dll", "doorstop_config.ini"]
@@ -126,12 +196,12 @@ async def test_seed_rejects_plugins_path_outside_plugins_dir(tmp_path):
          "installed_paths": ["winhttp.dll"]},
     ]}
     with pytest.raises(ValueError):
-        store.bepinex.seed_if_empty(bad_seed)
+        store.bepinex.seed_missing(bad_seed)
 
 
 async def test_set_latest_updates_version_and_url_and_clears_error(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty(VALHEIM_SEED)
+    store.bepinex.seed_missing(VALHEIM_SEED)
     await store.bepinex.set_latest("valheim", "ValheimModding/Jotunn", error="boom")
     await store.bepinex.set_latest("valheim", "ValheimModding/Jotunn", version="2.31.0",
                                    download_url="https://x/y.zip")
@@ -144,7 +214,7 @@ async def test_set_latest_updates_version_and_url_and_clears_error(tmp_path):
 
 async def test_set_latest_preserves_installed_fields(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty(VALHEIM_SEED)
+    store.bepinex.seed_missing(VALHEIM_SEED)
     await store.bepinex.set_latest("valheim", "ValheimModding/Jotunn", version="2.31.0",
                                    download_url="https://x/y.zip")
     entry = (await store.bepinex.all("valheim"))["ValheimModding/Jotunn"]
@@ -154,7 +224,7 @@ async def test_set_latest_preserves_installed_fields(tmp_path):
 
 async def test_set_latest_error_does_not_erase_known_latest_version(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty(VALHEIM_SEED)
+    store.bepinex.seed_missing(VALHEIM_SEED)
     await store.bepinex.set_latest("valheim", "ValheimModding/Jotunn", version="2.31.0",
                                    download_url="https://x/y.zip")
     await store.bepinex.set_latest("valheim", "ValheimModding/Jotunn", error="reseau down")
@@ -166,14 +236,14 @@ async def test_set_latest_error_does_not_erase_known_latest_version(tmp_path):
 
 async def test_set_latest_unknown_slug_is_noop(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty(VALHEIM_SEED)
+    store.bepinex.seed_missing(VALHEIM_SEED)
     await store.bepinex.set_latest("valheim", "unknown/slug", version="1.0.0", download_url="https://x")
     assert "unknown/slug" not in await store.bepinex.all("valheim")
 
 
 async def test_set_installed_updates_version_paths_and_clears_error(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty(VALHEIM_SEED)
+    store.bepinex.seed_missing(VALHEIM_SEED)
     await store.bepinex.set_latest("valheim", "ValheimModding/Jotunn", error="boom")
     before = datetime.now(UTC) - timedelta(seconds=1)
     await store.bepinex.set_installed(
@@ -189,7 +259,7 @@ async def test_set_installed_updates_version_paths_and_clears_error(tmp_path):
 
 async def test_set_installed_unknown_slug_is_noop(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty(VALHEIM_SEED)
+    store.bepinex.seed_missing(VALHEIM_SEED)
     await store.bepinex.set_installed("valheim", "unknown/slug", version="1.0.0",
                                       paths=["BepInEx/plugins/x.dll"])
     assert "unknown/slug" not in await store.bepinex.all("valheim")
@@ -206,12 +276,12 @@ async def test_seed_rejects_non_string_path_with_valueerror_not_attributeerror(t
          "installed_paths": ["BepInEx/plugins/x.dll", 123]},
     ]}
     with pytest.raises(ValueError):
-        store.bepinex.seed_if_empty(bad_seed)
+        store.bepinex.seed_missing(bad_seed)
 
 
 async def test_set_installed_rejects_bad_paths(tmp_path):
     store = make_store(tmp_path)
-    store.bepinex.seed_if_empty(VALHEIM_SEED)
+    store.bepinex.seed_missing(VALHEIM_SEED)
     with pytest.raises(ValueError):
         await store.bepinex.set_installed(
             "valheim", "ValheimModding/Jotunn", version="2.31.0",
