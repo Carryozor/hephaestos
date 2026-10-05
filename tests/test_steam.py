@@ -134,3 +134,67 @@ async def test_app_details_null_entry_returns_none_not_exception():
     # (trouve en revue finale).
     s = SteamBuildIds(make_client(lambda r: httpx.Response(200, json={"1": None})))
     assert await s.app_details(1) is None
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+OK_JSON = {"data": {"7": {"depots": {"branches": {"public": {"buildid": "555"}}}}}}
+
+
+async def test_network_failure_is_negative_cached_for_60s_then_retried():
+    calls = []
+    clock = FakeClock()
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(500)
+
+    s = SteamBuildIds(make_client(handler), clock=clock)
+    assert await s.public_buildid(7) is None
+    assert await s.public_buildid(7) is None
+    clock.now += 59
+    assert await s.public_buildid(7) is None
+    assert len(calls) == 1  # pas de nouvelle tentative (timeout 15 s) pendant 60 s
+    clock.now += 2  # 61 s apres l'echec
+    assert await s.public_buildid(7) is None
+    assert len(calls) == 2
+
+
+async def test_negative_cache_returns_last_known_value_and_recovers():
+    clock = FakeClock()
+    responses = [httpx.Response(200, json=OK_JSON), httpx.Response(500), httpx.Response(200, json=OK_JSON)]
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return responses.pop(0)
+
+    s = SteamBuildIds(make_client(handler), clock=clock)
+    assert await s.public_buildid(7) == "555"
+    clock.now += 901  # TTL du cache expire -> refetch -> echec
+    assert await s.public_buildid(7) == "555"  # derniere valeur connue
+    assert await s.public_buildid(7) == "555"  # servi par le cache negatif, pas de 3e appel
+    assert len(calls) == 2
+    clock.now += 61
+    assert await s.public_buildid(7) == "555"
+    assert len(calls) == 3
+
+
+async def test_negative_cache_is_per_appid():
+    clock = FakeClock()
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(500) if request.url.path.endswith("/7") else httpx.Response(
+            200, json={"data": {"8": {"depots": {"branches": {"public": {"buildid": "9"}}}}}})
+
+    s = SteamBuildIds(make_client(handler), clock=clock)
+    assert await s.public_buildid(7) is None
+    assert await s.public_buildid(8) == "9"

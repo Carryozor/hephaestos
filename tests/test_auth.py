@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from app.storage import hash_session_token
 from tests.test_sanity import make_app, make_logged_in_client
 
 AGT = {"Authorization": "Bearer agent-t"}
@@ -30,7 +31,7 @@ def test_require_agent_matrix(tmp_path):
     assert admin_client.get("/api/agent/orders").status_code == 401
 
 
-def test_require_admin_purges_expired_sessions_periodically(tmp_path):
+def test_require_admin_purges_expired_sessions_periodically(tmp_path, monkeypatch):
     import asyncio
     import json
 
@@ -40,14 +41,14 @@ def test_require_admin_purges_expired_sessions_periodically(tmp_path):
     store = client.app.state.store
     expired_token = asyncio.run(store.create_session("ghost", ttl_days=30))
     data = json.loads((tmp_path / "state.json").read_text())
-    data["sessions"][expired_token]["expires"] = "2020-01-01T00:00:00+00:00"
+    data["sessions"][hash_session_token(expired_token)]["expires"] = "2020-01-01T00:00:00+00:00"
     (tmp_path / "state.json").write_text(json.dumps(data))
 
-    auth._purge_call_counter = auth._PURGE_EVERY_N_CALLS - 1  # force le declenchement au prochain appel
+    monkeypatch.setattr(auth, "_last_purge_at", None)  # force le declenchement au prochain appel
     client.get("/api/servers")  # declenche require_admin -> purge
 
     remaining = json.loads((tmp_path / "state.json").read_text())["sessions"]
-    assert expired_token not in remaining
+    assert hash_session_token(expired_token) not in remaining
 
 
 # --- Durcissement 2026-07-21 : cookie Secure conditionne a l'env ---

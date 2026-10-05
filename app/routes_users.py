@@ -3,11 +3,10 @@
 Le mot de passe n'apparait JAMAIS dans une reponse ; le hash reste confine au
 storage. Garde-fous : pas d'auto-suppression, jamais moins d'un admin.
 """
-import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from app.auth import require_admin, require_admin_role
+from app.auth import check_password_bytes, hash_password, require_admin, require_admin_role
 
 router = APIRouter(prefix="/api")
 
@@ -21,9 +20,13 @@ class CreateUserRequest(BaseModel):
     role: str = Field(pattern="^(admin|user)$")
     servers: list[str] = []
 
+    _password_bytes = field_validator("password")(check_password_bytes)
+
 
 class PasswordRequest(BaseModel):
     password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=128)
+
+    _password_bytes = field_validator("password")(check_password_bytes)
 
 
 class AccessRequest(BaseModel):
@@ -52,7 +55,7 @@ async def list_users(request: Request):
 @router.post("/users", status_code=201, dependencies=[Depends(require_admin_role)])
 async def create_user(request: Request, body: CreateUserRequest):
     await _check_servers_known(request, body.servers)
-    password_hash = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()
+    password_hash = await hash_password(body.password)
     try:
         await request.app.state.store.create_user(
             body.username, password_hash, role=body.role, servers=body.servers)
@@ -77,7 +80,7 @@ async def delete_user(request: Request, username: str):
 
 @router.post("/users/{username}/password", dependencies=[Depends(require_admin_role)])
 async def reset_password(request: Request, username: str, body: PasswordRequest):
-    password_hash = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()
+    password_hash = await hash_password(body.password)
     if not await request.app.state.store.set_user_password(username, password_hash):
         raise HTTPException(404, "compte inconnu")
     return {"ok": True}

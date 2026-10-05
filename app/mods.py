@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import Request
 
+from app.freshness import is_state_fresh
 from app.steam_workshop import (
     WorkshopFetchError,
     WorkshopInvalidReference,
@@ -193,20 +194,22 @@ async def enqueue_mod_update_orders(request: Request, name: str, *, include_unkn
         if not needs and include_unknown_dates and not meta.get("installed_at"):
             needs = True
         if needs and wid not in pending_install_ids:
-            await store.add_order(name, "install_mod", {
+            # le pre-test ci-dessus n'est qu'un raccourci : la garde atomique est ici
+            order = await store.add_order_unless_pending(name, "install_mod", {
                 "workshop_id": wid,
                 "title": meta.get("title") or f"Mod {wid}",
                 "thumbnail_url": meta.get("thumbnail_url") or "",
-            }, author=author)
-            created += 1
+            }, author=author, match=lambda o, wid=wid: o.get("workshop_id") == wid)
+            if order is not None:
+                created += 1
 
     restart_created = False
     if created:
         snap = await store.snapshot()
         state = snap["servers"].get(name) or {}
         if state.get("process_up") and not any(o["type"] == "restart" for o in pending):
-            await store.add_order(name, "restart", author=author)
-            restart_created = True
+            restart_created = await store.add_order_unless_pending(
+                name, "restart", author=author) is not None
     return {"orders_created": created, "restart": restart_created}
 
 
@@ -230,6 +233,8 @@ async def auto_enqueue_mod_updates(request: Request) -> None:
             if "workshop_appid" not in cfg:
                 continue
             state = snap["servers"].get(name) or {}
+            if not is_state_fresh(state):
+                continue  # players==0 lu dans un rapport perime ne prouve rien
             if state.get("players") != 0:
                 continue
             if name in servers_with_pending:

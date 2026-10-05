@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from tests.test_sanity import activate_all_servers
 
 SERVERS = {"palworld": {"display_name": "Palworld", "server_appid": 2394010}}
 BACKUPS = [
@@ -30,7 +31,7 @@ def make_app_saves(tmp_path, alert_webhook=None, captured=None):
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     settings = Settings(agent_token="agent-t", data_dir=tmp_path, servers=SERVERS,
                         alert_webhook=alert_webhook)
-    app = create_app(settings, http_client=client)
+    app = activate_all_servers(create_app(settings, http_client=client))
     h = bcrypt.hashpw(b"testpass123", bcrypt.gensalt()).decode()
     asyncio.run(app.state.store.create_user("boss", h, role="admin"))
     asyncio.run(

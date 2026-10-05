@@ -1,11 +1,13 @@
 import asyncio
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 
 import bcrypt
 import httpx
 from fastapi.testclient import TestClient
 
-from tests.test_sanity import make_app, make_logged_in_client
+from app import mods
+from app.freshness import STATE_FRESH_SECONDS
+from tests.test_sanity import activate_all_servers, make_app, make_logged_in_client
 
 
 def make_client(tmp_path):
@@ -216,7 +218,7 @@ def make_client_with_workshop(tmp_path, workshop_result=None, steam_api_key=None
         servers={"palworld": {"display_name": "Palworld", "server_appid": 2394010, "workshop_appid": 1623730}},
         steam_api_key=steam_api_key,
     )
-    app = create_app(settings, http_client=client)
+    app = activate_all_servers(create_app(settings, http_client=client))
     password_hash = bcrypt.hashpw(b"testpass123", bcrypt.gensalt()).decode()
     asyncio.run(app.state.store.create_user("tester", password_hash))
     c = TestClient(app)
@@ -481,12 +483,18 @@ def test_mod_update_not_available_when_not_installed(tmp_path):
     assert mod["update_available"] is False
 
 
-def _write_mods_fleet(tmp_path, process_up=True, players=0):
+def _fresh_last_seen():
+    # B2.3 : l'auto-enqueue ignore un etat perime (> STATE_FRESH_SECONDS) ; les rapports
+    # simules doivent donc porter un last_seen frais, pas une date figee.
+    return datetime.now(UTC).isoformat()
+
+
+def _write_mods_fleet(tmp_path, process_up=True, players=0, last_seen=None):
     # 3 mods installes : "1" a jour, "2" maj dispo, "3" sans installed_at (pre-feature)
     import json
     data = json.loads((tmp_path / "state.json").read_text())
     data["servers"] = {"palworld": {"process_up": process_up, "players": players,
-                                    "last_seen": "2026-07-16T00:00:00+00:00"}}
+                                    "last_seen": last_seen or _fresh_last_seen()}}
     data["mods_state"] = {"palworld": {"installed_mod_ids": ["1", "2", "3"], "changed_at": None}}
     data["mods_metadata"] = {"palworld": {
         "1": {"title": "AJour", "thumbnail_url": "", "installed_at": "2026-07-16T00:00:00+00:00",
@@ -606,13 +614,13 @@ def test_agent_poll_auto_update_respects_cooldown(tmp_path):
     assert _pending(c) == []
 
 
-def _write_game_state(tmp_path, buildid="100", players=0, process_up=True):
+def _write_game_state(tmp_path, buildid="100", players=0, process_up=True, last_seen=None):
     # STEAM_JSON (test_sanity.py) renvoie toujours le buildid public "24088465" pour
     # l'appid palworld (2394010) : "100" simule une MAJ dispo, "24088465" = a jour.
     import json
     data = json.loads((tmp_path / "state.json").read_text())
     data["servers"] = {"palworld": {"buildid": buildid, "process_up": process_up, "players": players,
-                                    "last_seen": "2026-07-17T00:00:00+00:00"}}
+                                    "last_seen": last_seen or _fresh_last_seen()}}
     (tmp_path / "state.json").write_text(json.dumps(data))
 
 
@@ -648,7 +656,7 @@ def test_game_auto_update_skipped_if_player_joins_during_steam_lookup(tmp_path):
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     settings = Settings(agent_token="agent-t", data_dir=tmp_path,
                         servers={"palworld": {"display_name": "Palworld", "server_appid": 2394010}})
-    app = create_app(settings, http_client=http_client)
+    app = activate_all_servers(create_app(settings, http_client=http_client))
     password_hash = bcrypt.hashpw(b"testpass123", bcrypt.gensalt()).decode()
     asyncio.run(app.state.store.create_user("tester", password_hash))
     c = TestClient(app)
@@ -725,7 +733,7 @@ def test_agent_poll_auto_enqueues_updates_for_all_eligible_servers(tmp_path):
         "palworld": {"display_name": "Palworld", "server_appid": 2394010},
         "windrose": {"display_name": "Windrose", "server_appid": 4129620},
     })
-    app = create_app(settings, http_client=http_client)
+    app = activate_all_servers(create_app(settings, http_client=http_client))
     password_hash = bcrypt.hashpw(b"testpass123", bcrypt.gensalt()).decode()
     asyncio.run(app.state.store.create_user("tester", password_hash))
     c = TestClient(app)
@@ -733,8 +741,8 @@ def test_agent_poll_auto_enqueues_updates_for_all_eligible_servers(tmp_path):
 
     data = json.loads((tmp_path / "state.json").read_text())
     data["servers"] = {
-        "palworld": {"buildid": "100", "process_up": True, "players": 0, "last_seen": "2026-07-17T00:00:00+00:00"},
-        "windrose": {"buildid": "1", "process_up": True, "players": 0, "last_seen": "2026-07-17T00:00:00+00:00"},
+        "palworld": {"buildid": "100", "process_up": True, "players": 0, "last_seen": _fresh_last_seen()},
+        "windrose": {"buildid": "1", "process_up": True, "players": 0, "last_seen": _fresh_last_seen()},
     }
     (tmp_path / "state.json").write_text(json.dumps(data))
 
@@ -1219,3 +1227,81 @@ def test_detail_hides_file_read_and_listing_from_non_admin(tmp_path):
     us = user.get("/api/servers/palworld/detail").json()
     assert us["file_read"] is None
     assert us["files_listing"] == {}
+
+
+def _stale_last_seen():
+    return (datetime.now(UTC) - timedelta(seconds=STATE_FRESH_SECONDS + 60)).isoformat()
+
+
+def test_no_auto_mod_update_when_state_stale_even_if_players_zero(tmp_path):
+    c = make_client_with_workshop(tmp_path)
+    _write_mods_fleet(tmp_path, players=0, last_seen=_stale_last_seen())
+    assert _pending(c) == []
+
+
+def test_no_auto_game_update_when_state_stale_even_if_players_zero(tmp_path):
+    c = make_client(tmp_path)
+    _write_game_state(tmp_path, buildid="100", players=0, last_seen=_stale_last_seen())
+    assert _pending(c) == []
+
+
+def test_no_auto_game_update_when_last_seen_missing(tmp_path):
+    import json
+    c = make_client(tmp_path)
+    data = json.loads((tmp_path / "state.json").read_text())
+    data["servers"] = {"palworld": {"buildid": "100", "process_up": True, "players": 0}}
+    (tmp_path / "state.json").write_text(json.dumps(data))
+    assert _pending(c) == []
+
+
+def test_auto_game_update_fresh_state_unchanged(tmp_path):
+    c = make_client(tmp_path)
+    _write_game_state(tmp_path, buildid="100", players=0,
+                      last_seen=(datetime.now(UTC) - timedelta(seconds=STATE_FRESH_SECONDS - 60)).isoformat())
+    assert [t for t, _ in _pending(c)] == ["update"]
+
+
+def test_concurrent_enqueue_mod_update_orders_creates_one_order_per_mod(tmp_path):
+    # B2.8 : le test "deja en file" et add_order doivent etre atomiques ; deux appels
+    # concurrents (bouton manuel + auto-update) ne doivent pas doubler les ordres.
+    from types import SimpleNamespace
+
+    c = make_client_with_workshop(tmp_path)
+    _write_mods_fleet(tmp_path)
+    request = SimpleNamespace(app=c.app)
+    store = c.app.state.store
+    real_pending = store.pending_orders
+
+    async def stale_pending():
+        # simule la fenetre de course : chaque appel lit la file AVANT l'insertion de
+        # l'autre. Seule une garde atomique cote Store empeche alors le doublon.
+        return []
+
+    store.pending_orders = stale_pending
+
+    async def both():
+        return await asyncio.gather(
+            mods.enqueue_mod_update_orders(request, "palworld", include_unknown_dates=True, author="a"),
+            mods.enqueue_mod_update_orders(request, "palworld", include_unknown_dates=True, author="b"),
+        )
+
+    r1, r2 = asyncio.run(both())
+    store.pending_orders = real_pending
+    orders = asyncio.run(store.pending_orders())
+    installs = sorted(o["workshop_id"] for o in orders if o["type"] == "install_mod")
+    assert installs == ["2", "3"]  # un seul ordre par mod
+    assert sum(1 for o in orders if o["type"] == "restart") == 1
+    assert r1["orders_created"] + r2["orders_created"] == 2
+
+
+async def test_add_order_unless_pending_returns_none_when_matching_order_exists(tmp_path):
+    from app.storage import Store
+    s = Store(tmp_path / "s.json")
+    first = await s.add_order_unless_pending("palworld", "install_mod", {"workshop_id": "1"},
+                                             author="x", match=lambda o: o.get("workshop_id") == "1")
+    dup = await s.add_order_unless_pending("palworld", "install_mod", {"workshop_id": "1"},
+                                           author="x", match=lambda o: o.get("workshop_id") == "1")
+    other = await s.add_order_unless_pending("palworld", "install_mod", {"workshop_id": "2"},
+                                             author="x", match=lambda o: o.get("workshop_id") == "2")
+    assert first is not None and dup is None and other is not None
+    assert len(await s.pending_orders()) == 2

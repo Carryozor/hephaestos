@@ -10,11 +10,10 @@ connexion juste après l'inscription.
 Réutilise les contraintes de validation de routes_users (même politique de mot de passe
 et de nom d'utilisateur pour tout le projet).
 """
-import bcrypt
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from app.auth import SESSION_TTL_DAYS, set_session_cookie
+from app.auth import SESSION_TTL_DAYS, check_password_bytes, hash_password, set_session_cookie
 from app.routes_users import PASSWORD_MIN_LENGTH, USERNAME_PATTERN
 
 router = APIRouter(prefix="/api/setup")
@@ -23,6 +22,8 @@ router = APIRouter(prefix="/api/setup")
 class SetupRequest(BaseModel):
     username: str = Field(pattern=USERNAME_PATTERN)
     password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=128)
+
+    _password_bytes = field_validator("password")(check_password_bytes)
 
 
 async def _users_exist(request: Request) -> bool:
@@ -40,7 +41,7 @@ async def setup_needed(request: Request) -> dict:
 @router.post("", status_code=201)
 async def setup(request: Request, response: Response, body: SetupRequest) -> dict:
     store = request.app.state.store
-    password_hash = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()
+    password_hash = await hash_password(body.password)
     try:
         await store.create_first_admin(body.username, password_hash)
     except ValueError:

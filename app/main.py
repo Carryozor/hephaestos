@@ -1,8 +1,10 @@
+import logging
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -19,19 +21,40 @@ from app import (
     routes_users,
 )
 from app.config import Settings
+from app.freshness import STATE_STALE_SECONDS
 from app.steam import SteamBuildIds
 from app.storage import Store
 
-STATIC_DIR = Path(__file__).parent / "static"
+logger = logging.getLogger(__name__)
 
-# Au-dela de ce delai sans rapport agent, l'etat n'est plus digne de confiance
-# (cycle agent = 2 min ; 10 min = 5 cycles rates).
-HEALTH_STALE_SECONDS = 600
+STATIC_DIR = Path(__file__).parent / "static"
+HEALTH_SUCCESS_TTL_SECONDS = 5.0
+HEALTH_FAILURE_TTL_SECONDS = 1.0
+
+# Seuil de peremption : constante unique dans app/freshness.py (partagee avec /metrics).
+HEALTH_STALE_SECONDS = STATE_STALE_SECONDS
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "frame-ancestors 'none'; base-uri 'self'; object-src 'none'",
+}
 
 
 def create_app(settings: Settings, http_client: httpx.AsyncClient | None = None) -> FastAPI:
-    app = FastAPI(title="Hephaestos")
+    # Pas de documentation interactive ni de schema OpenAPI exposes (surface d'attaque inutile).
+    app = FastAPI(title="Hephaestos", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        # Pas de script-src/default-src : app.js utilise des onclick inline.
+        response = await call_next(request)
+        for key, value in SECURITY_HEADERS.items():
+            response.headers[key] = value
+        return response
+
     app.state.store = Store(settings.data_dir / "state.json")
     app.state.store.registry.seed_if_empty(settings.servers)
     app.state.store.bepinex.seed_missing(settings.bepinex_mods)
@@ -48,8 +71,26 @@ def create_app(settings: Settings, http_client: httpx.AsyncClient | None = None)
     app.include_router(metrics.router)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    # /api/health est public : sans cache, chaque appel relit et parse tout le state.json
+    # sous le verrou global. Succes servi 5 s ; echec 1 s seulement (retour a la
+    # normale visible vite). Horloge injectable (tests) via app.state.health_clock.
+    app.state.health_clock = time.monotonic
+    health_cache: dict = {"until": 0.0, "ok": True}
+
     @app.get("/api/health")
     async def health():
+        """Liveness + lisibilite du state.json : un fichier illisible/corrompu = 503."""
+        now = app.state.health_clock()
+        if now >= health_cache["until"]:
+            try:
+                await app.state.store.snapshot()
+            except Exception:
+                logger.exception("health : lecture du state.json impossible")
+                health_cache.update(ok=False, until=now + HEALTH_FAILURE_TTL_SECONDS)
+            else:
+                health_cache.update(ok=True, until=now + HEALTH_SUCCESS_TTL_SECONDS)
+        if not health_cache["ok"]:
+            return JSONResponse({"ok": False, "reason": "state.json illisible"}, status_code=503)
         return {"ok": True}
 
     @app.get("/api/version")

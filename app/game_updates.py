@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import Request
 
+from app.freshness import is_state_fresh
+
 logger = logging.getLogger(__name__)
 
 # Meme garde-fou que MODS_AUTO_COOLDOWN_HOURS (app/mods.py) : sans cooldown, un
@@ -31,6 +33,8 @@ async def auto_enqueue_game_updates(request: Request) -> None:
         servers_with_pending = {o["server"] for o in pending}
         for name, cfg in (await store.registry.all()).items():
             state = snap["servers"].get(name) or {}
+            if not is_state_fresh(state):
+                continue  # players==0 lu dans un rapport perime ne prouve rien
             local = state.get("buildid")
             if not local:
                 continue
@@ -54,7 +58,8 @@ async def auto_enqueue_game_updates(request: Request) -> None:
             # se connecter pendant cet aller-retour (TOCTOU). Sans ce re-check, un
             # ordre "update" pourrait etre cree alors qu'un joueur vient de rejoindre.
             fresh = await store.snapshot()
-            if (fresh["servers"].get(name) or {}).get("players") != 0:
+            fresh_state = fresh["servers"].get(name) or {}
+            if fresh_state.get("players") != 0 or not is_state_fresh(fresh_state):
                 continue
             await store.add_order(name, "update", author="auto")
             await store.set_game_auto_marker(name)

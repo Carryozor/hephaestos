@@ -46,10 +46,19 @@ def _pending(c):
             c.get("/api/agent/orders", headers={"Authorization": "Bearer agent-t"}).json()["orders"]]
 
 
-def _write_state(tmp_path, process_up):
+_report_counter = 0
+
+
+def _write_state(tmp_path, process_up, last_seen=None):
+    """Simule UN rapport d'etat agent : last_seen frais ET distinct a chaque appel
+    (le backend ne compte qu'un rapport distinct, cf. last_seen_counted)."""
+    global _report_counter
+    _report_counter += 1
+    if last_seen is None:
+        last_seen = (datetime.now(UTC) + timedelta(microseconds=_report_counter)).isoformat()
     data = json.loads((tmp_path / "state.json").read_text())
     data["servers"] = {"palworld": {"process_up": process_up, "players": None,
-                                    "last_seen": "2026-08-08T20:12:00+00:00"}}
+                                    "last_seen": last_seen}}
     (tmp_path / "state.json").write_text(json.dumps(data))
 
 
@@ -121,8 +130,9 @@ def test_history_reset_only_after_confirm_polls_consecutive_up(tmp_path):
     c.put("/api/servers/palworld/registry", json={"auto_restart_on_crash": True, "status": "active"})
     _seed_recovery(tmp_path, attempts=[datetime.now(UTC).isoformat()])
     _write_state(tmp_path, process_up=True)
-    _pending(c)  # 1er poll up : pas encore confirme
-    _pending(c)  # 2e poll up consecutif : confirme -> reset
+    _pending(c)  # 1er rapport up : pas encore confirme
+    _write_state(tmp_path, process_up=True)  # 2e rapport DISTINCT (nouveau last_seen)
+    _pending(c)  # 2e rapport up consecutif : confirme -> reset
     info = _crash_recovery(tmp_path)
     assert info["attempts"] == [] and info["breaker_tripped_at"] is None and info["up_streak"] == 0
 
@@ -220,3 +230,83 @@ def test_no_crash_when_alert_webhook_not_configured(tmp_path):
     _seed_recovery(tmp_path, attempts=[datetime.now(UTC).isoformat() for _ in range(3)])
     _write_state(tmp_path, process_up=False)
     assert _pending(c) == []  # pas d'exception, juste pas d'alerte envoyee
+
+
+AGENT_AUTH = {"Authorization": "Bearer agent-t"}
+
+
+def _setup_two_attempts(tmp_path):
+    c = make_client(tmp_path)
+    c.put("/api/servers/palworld/registry", json={"auto_restart_on_crash": True, "status": "active"})
+    now = datetime.now(UTC)
+    _seed_recovery(tmp_path, [(now - timedelta(minutes=20)).isoformat(),
+                              (now - timedelta(minutes=10)).isoformat()])
+    return c
+
+
+def test_temoin_process_down_adds_third_attempt(tmp_path):
+    c = _setup_two_attempts(tmp_path)
+    _write_state(tmp_path, process_up=False)
+    c.get("/api/agent/orders", headers=AGENT_AUTH)
+    assert len(_crash_recovery(tmp_path)["attempts"]) == 3
+
+
+def test_one_up_report_polled_twice_keeps_history(tmp_path):
+    # Regression B2.1 : le long-poll fait ~4 GET /orders par rapport d'etat ; sans
+    # rapport nouveau entre deux GET, le streak ne doit pas avancer (sinon UN seul
+    # rapport confirmait la stabilite et desarmait le disjoncteur).
+    c = _setup_two_attempts(tmp_path)
+    _write_state(tmp_path, process_up=True)
+    c.get("/api/agent/orders", headers=AGENT_AUTH)
+    c.get("/api/agent/orders", headers=AGENT_AUTH)
+    info = _crash_recovery(tmp_path)
+    assert len(info["attempts"]) == 2
+    assert info["up_streak"] == 1
+
+
+def test_two_distinct_up_reports_clear_history(tmp_path):
+    c = _setup_two_attempts(tmp_path)
+    _write_state(tmp_path, process_up=True)
+    c.get("/api/agent/orders", headers=AGENT_AUTH)
+    _write_state(tmp_path, process_up=True)
+    c.get("/api/agent/orders", headers=AGENT_AUTH)
+    info = _crash_recovery(tmp_path)
+    assert info["attempts"] == [] and info["up_streak"] == 0
+
+
+def test_down_report_resets_streak_to_zero(tmp_path):
+    c = _setup_two_attempts(tmp_path)
+    _write_state(tmp_path, process_up=True)
+    c.get("/api/agent/orders", headers=AGENT_AUTH)
+    assert _crash_recovery(tmp_path)["up_streak"] == 1
+    _write_state(tmp_path, process_up=False)
+    c.get("/api/agent/orders", headers=AGENT_AUTH)
+    assert _crash_recovery(tmp_path)["up_streak"] == 0
+
+
+def test_legacy_crash_recovery_without_last_seen_counted_is_handled(tmp_path):
+    # state.json existant : cle last_seen_counted absente => None, pas d'erreur
+    c = _setup_two_attempts(tmp_path)
+    assert "last_seen_counted" not in _crash_recovery(tmp_path)
+    _write_state(tmp_path, process_up=True)
+    c.get("/api/agent/orders", headers=AGENT_AUTH)
+    assert _crash_recovery(tmp_path)["up_streak"] == 1
+
+
+def test_stale_down_state_does_not_trigger_restart(tmp_path):
+    # B2.3 : process_up=False lu dans un etat perime (agent muet) n'est pas fiable
+    c = make_client(tmp_path)
+    c.put("/api/servers/palworld/registry", json={"auto_restart_on_crash": True, "status": "active"})
+    old = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+    _write_state(tmp_path, process_up=False, last_seen=old)
+    assert _pending(c) == []
+    assert _crash_recovery(tmp_path)["attempts"] == []
+
+
+def test_down_state_without_last_seen_does_not_trigger_restart(tmp_path):
+    c = make_client(tmp_path)
+    c.put("/api/servers/palworld/registry", json={"auto_restart_on_crash": True, "status": "active"})
+    data = json.loads((tmp_path / "state.json").read_text())
+    data["servers"] = {"palworld": {"process_up": False, "players": None}}
+    (tmp_path / "state.json").write_text(json.dumps(data))
+    assert _pending(c) == []

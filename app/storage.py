@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import secrets
 from collections.abc import Callable
@@ -10,12 +11,30 @@ from uuid import uuid4
 
 from app.storage_bepinex import BepInExRepository
 
+logger = logging.getLogger(__name__)
+
 ORDER_TYPES = {"update", "restart", "start", "stop", "install_mod", "remove_mod",
                "backup", "restore_save", "install_game", "scan_exe", "setup_server",
                "list_files", "read_file", "write_file", "update_bepinex_mods"}
 ORDER_STATUSES = {"running", "done", "failed"}
 ORDER_TERMINAL_RETENTION_DAYS = 7
 ORDER_STALE_HOURS = 24
+# Champs de contenu d'un ordre write_file : ne doivent pas survivre a l'ordre
+# (config jeu en clair, potentiellement des secrets) une fois celui-ci termine.
+ORDER_CONTENT_FIELDS = ("content_b64", "expected_sha256")
+STATE_FILE_MODE = 0o600
+
+
+def hash_session_token(token: str) -> str:
+    """Cle de stockage d'une session : sha256 du token brut. Le token brut n'existe que
+    dans le cookie ; un state.json lu par un tiers ne permet donc pas de rejouer une
+    session (token_hex(32) = 256 bits d'entropie, un hash rapide suffit)."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _strip_order_content(order: dict) -> None:
+    for field in ORDER_CONTENT_FIELDS:
+        order.pop(field, None)
 
 
 class OrderConflict(Exception):
@@ -37,7 +56,9 @@ class Store:
         self._lock = asyncio.Lock()
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
-            self._dump({"servers": {}, "orders": [], "users": {}, "sessions": {}})
+            self._dump({"servers": {}, "orders": [], "users": {}, "sessions": {},
+                        "sessions_hashed": True})
+        self._migrate_sessions()
         self.mods = ModsRepository(self)
         self.registry = ServersRepository(self)
         self.bepinex = BepInExRepository(self)
@@ -45,13 +66,32 @@ class Store:
     def _load(self) -> dict:
         return json.loads(self._path.read_text())
 
+    def _migrate_sessions(self) -> None:
+        """Les sessions etaient stockees sous la cle du token BRUT ; elles le sont
+        desormais sous sha256(token). Sans marqueur `sessions_hashed`, les anciennes
+        cles brutes sont invalidees (videes) : tout le monde se reconnecte une fois."""
+        data = self._load()
+        if data.get("sessions_hashed"):
+            return
+        dropped = len(data.get("sessions", {}))
+        data["sessions"] = {}
+        data["sessions_hashed"] = True
+        self._dump(data)
+        logger.warning("migration sessions hachees : %d ancienne(s) session(s) invalidee(s), "
+                       "reconnexion requise", dropped)
+
     def _dump(self, data: dict) -> None:
         # Ecriture atomique DURABLE : write+fsync du tmp, replace, puis fsync du
         # repertoire. Sans les fsync, un crash/coupure apres le replace peut laisser
         # un state.json tronque ou perdre le rename (donnees en cache page non
         # flushees) -- l'etat SoT unique du service ne doit pas etre corruptible ainsi.
+        # 0600 : le fichier contient hashes de mots de passe, sessions, config jeu.
+        # fchmod sur le fd couvre un .tmp preexistant (os.open ne change pas le mode
+        # d'un fichier existant) ; le rename transmet le mode au state.json final.
         tmp = self._path.with_suffix(".tmp")
-        with tmp.open("w") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, STATE_FILE_MODE)
+        os.fchmod(fd, STATE_FILE_MODE)
+        with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
@@ -84,10 +124,18 @@ class Store:
             data["orders"] = kept
             changed = True
 
+        # rattrapage : un ordre termine AVANT le correctif qui purge le contenu a la
+        # cloture garde content_b64/expected_sha256 dans le state.json
+        for o in data["orders"]:
+            if o["status"] in ("done", "failed") and any(f in o for f in ORDER_CONTENT_FIELDS):
+                _strip_order_content(o)
+                changed = True
+
         stale_cutoff = now - timedelta(hours=ORDER_STALE_HOURS)
         for o in data["orders"]:
             if o["status"] in ("pending", "running") and datetime.fromisoformat(o["created"]) < stale_cutoff:
                 o["status"] = "failed"
+                _strip_order_content(o)
                 o["detail"] = f"expire automatiquement (sans reponse de l'agent depuis plus de {ORDER_STALE_HOURS}h)"
                 # trace pour notification : une mort par expiration est aussi grave
                 # qu'un failed rapporte, elle ne doit pas rester invisible
@@ -124,6 +172,18 @@ class Store:
             data["orders"].append(order)
             self._dump(data)
             return order
+
+    async def add_order_unless_pending(self, server: str, type_: str, payload: dict | None = None,
+                                       author: str | None = None,
+                                       match: Callable[[dict], bool] = lambda o: True) -> dict | None:
+        """Cree l'ordre sauf si un ordre (server, type) pending/running verifiant `match`
+        existe deja : retourne None dans ce cas. Test + insertion sous le MEME verrou
+        (comme add_order(reject_if=...)) : un pre-test fait en amont sur une lecture de
+        la file peut etre perime des l'appel suivant (course bouton manuel / auto)."""
+        try:
+            return await self.add_order(server, type_, payload, author=author, reject_if=match)
+        except OrderConflict:
+            return None
 
     async def order_history(self, server: str, limit: int = 15) -> list[dict]:
         """Derniers ordres TERMINES (done/failed) du serveur, plus recent d'abord.
@@ -167,13 +227,28 @@ class Store:
                     if o["status"] != "pending":
                         return {**o, "cancel_refused": True}
                     o["status"] = "failed"
+                    _strip_order_content(o)
                     o["detail"] = "annule par l'admin"
                     self._dump(data)
                     return o
             return None
 
     async def set_order_status(self, order_id: str, status: str, detail: str | None = None) -> dict | None:
-        """Change le statut d'un ordre.
+        """Alias retro-compatible de complete_order sans effet de bord registre."""
+        return await self.complete_order(order_id, status, detail)
+
+    async def complete_order(self, order_id: str, status: str, detail: str | None = None,
+                             registry_effect: Callable[[dict, dict], None] | None = None) -> dict | None:
+        """Change le statut d'un ordre ET applique son effet de bord registre, de facon
+        ATOMIQUE : un seul verrou, un seul _dump. Avant, la route persistait "done" puis
+        mettait le registre a jour dans un 2e temps ; une exception entre les deux laissait
+        un ordre terminal avec un registre jamais mis a jour (l'agent, relancant son
+        rapport, recevait 409 : etat incoherent irreparable).
+
+        `registry_effect(data, order)` (optionnel, appele seulement pour status == "done"
+        et jamais sur un ordre deja terminal) mute `data` -- le dict d'etat brut charge
+        sous le verrou. S'il leve, rien n'est persiste (ni statut, ni effet) et
+        l'exception remonte.
 
         "done" et "failed" sont des etats terminaux : toute transition DEPUIS
         l'un d'eux est refusee — l'ordre est retourne inchange (copie) avec le
@@ -190,6 +265,8 @@ class Store:
                     if o["status"] in ("done", "failed"):
                         return {**o, "terminal_refused": True}
                     o["status"], o["detail"] = status, detail
+                    if status in ("done", "failed"):
+                        _strip_order_content(o)
                     # install_mod confirme "done" = le mod sur disque vient d'etre
                     # remplace par la derniere version Workshop : rafraichir
                     # installed_at, sinon le badge "maj dispo" (steam_updated_at >
@@ -218,6 +295,8 @@ class Store:
                         data.setdefault("servers_desired_state", {})[o["server"]] = "running"
                     if status == "done" and o["type"] == "stop":
                         data.setdefault("servers_desired_state", {})[o["server"]] = "stopped"
+                    if status == "done" and registry_effect is not None:
+                        registry_effect(data, o)
                     self._dump(data)
                     return o
             return None
@@ -257,22 +336,28 @@ class Store:
 
     async def get_crash_recovery(self, name: str) -> dict:
         """Historique des tentatives d'auto-redemarrage sur crash pour ce serveur :
-        {"attempts": [iso...], "breaker_tripped_at": iso|None, "up_streak": int}.
-        up_streak = nb de polls consecutifs process_up=True vus (cf.
+        {"attempts": [iso...], "breaker_tripped_at": iso|None, "up_streak": int,
+        "last_seen_counted": iso|None}.
+        last_seen_counted = last_seen du dernier rapport d'etat compte dans up_streak :
+        le long-poll appelle l'auto-enqueue ~4x par rapport, un meme rapport ne doit
+        compter qu'une fois (absent dans un state.json ancien = None).
+        up_streak = nb de rapports distincts consecutifs process_up=True vus (cf.
         app/crash_recovery.py : un seul poll up ne suffit pas a effacer
         l'historique, un crash-loop qui remonte brievement entre deux crashs ne
         doit pas desarmer le disjoncteur). Absent = jamais declenche."""
         async with self._lock:
-            return self._load().get("crash_recovery", {}).get(
-                name, {"attempts": [], "breaker_tripped_at": None, "up_streak": 0})
+            entry = self._load().get("crash_recovery", {}).get(name)
+            return {"attempts": [], "breaker_tripped_at": None, "up_streak": 0,
+                    "last_seen_counted": None, **(entry or {})}
 
     async def set_crash_recovery(self, name: str, attempts: list[str],
-                                 breaker_tripped_at: str | None, up_streak: int = 0) -> None:
+                                 breaker_tripped_at: str | None, up_streak: int = 0,
+                                 last_seen_counted: str | None = None) -> None:
         async with self._lock:
             data = self._load()
             data.setdefault("crash_recovery", {})[name] = {
                 "attempts": attempts, "breaker_tripped_at": breaker_tripped_at,
-                "up_streak": up_streak}
+                "up_streak": up_streak, "last_seen_counted": last_seen_counted}
             self._dump(data)
 
     async def clear_crash_recovery(self, name: str) -> None:
@@ -284,8 +369,11 @@ class Store:
             existing = data.get("crash_recovery", {}).get(name)
             if existing and (existing.get("attempts") or existing.get("breaker_tripped_at")
                              or existing.get("up_streak")):
+                # last_seen_counted conserve : le rapport deja compte ne doit pas
+                # relancer un streak au prochain GET /orders
                 data.setdefault("crash_recovery", {})[name] = {
-                    "attempts": [], "breaker_tripped_at": None, "up_streak": 0}
+                    "attempts": [], "breaker_tripped_at": None, "up_streak": 0,
+                    "last_seen_counted": existing.get("last_seen_counted")}
                 self._dump(data)
 
     async def snapshot(self) -> dict:
@@ -347,8 +435,8 @@ class Store:
                 return False
             del data["users"][username]
             sessions = data.get("sessions", {})
-            for token in [t for t, s in sessions.items() if s.get("username") == username]:
-                del sessions[token]
+            for key in [k for k, s in sessions.items() if s.get("username") == username]:
+                del sessions[key]
             self._dump(data)
             return True
 
@@ -363,8 +451,8 @@ class Store:
                 return False
             user["password_hash"] = password_hash
             sessions = data.get("sessions", {})
-            for token in [t for t, s in sessions.items() if s.get("username") == username]:
-                del sessions[token]
+            for key in [k for k, s in sessions.items() if s.get("username") == username]:
+                del sessions[key]
             self._dump(data)
             return True
 
@@ -396,14 +484,14 @@ class Store:
         async with self._lock:
             data = self._load()
             expires = (datetime.now(UTC) + timedelta(days=ttl_days)).isoformat()
-            data.setdefault("sessions", {})[token] = {"username": username, "expires": expires}
+            data.setdefault("sessions", {})[hash_session_token(token)] = {"username": username, "expires": expires}
             self._dump(data)
         return token
 
     async def get_session(self, token: str) -> dict | None:
         async with self._lock:
             data = self._load()
-            session = data.get("sessions", {}).get(token)
+            session = data.get("sessions", {}).get(hash_session_token(token))
             if session is None:
                 return None
             if datetime.fromisoformat(session["expires"]) < datetime.now(UTC):
@@ -417,7 +505,7 @@ class Store:
         provoquerait une reecriture complete du fichier."""
         async with self._lock:
             data = self._load()
-            session = data.get("sessions", {}).get(token)
+            session = data.get("sessions", {}).get(hash_session_token(token))
             if session is None:
                 return
             new_expires = datetime.now(UTC) + timedelta(days=ttl_days)
@@ -430,7 +518,7 @@ class Store:
     async def delete_session(self, token: str) -> None:
         async with self._lock:
             data = self._load()
-            data.get("sessions", {}).pop(token, None)
+            data.get("sessions", {}).pop(hash_session_token(token), None)
             self._dump(data)
 
     async def purge_expired_sessions(self) -> int:
@@ -463,7 +551,11 @@ class Store:
                 self._dump(data)
             return len(orphans)
 
-    async def update_player_sessions(self, name: str, players: list[dict]) -> None:
+    async def update_player_sessions(self, name: str, players: list[dict] | None) -> None:
+        """None = "ne pas toucher" (agent sans source de comptage) ; liste VIDE = tout
+        le monde est parti (ferme les sessions ouvertes)."""
+        if players is None:
+            return
         async with self._lock:
             data = self._load()
             sessions = data.setdefault("player_sessions", {}).setdefault(name, {})

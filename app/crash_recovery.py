@@ -16,8 +16,9 @@ rechargeant la meme save corrompue a chaque redemarrage) : au-dela de
 CRASH_RESTART_MAX_ATTEMPTS tentatives dans une fenetre glissante de
 CRASH_RESTART_WINDOW_MINUTES, le disjoncteur se declenche : plus aucun ordre auto
 n'est cree et une alerte webhook part une seule fois. L'historique n'est efface que
-lorsque l'uptime est CONFIRME stable sur CRASH_RESTART_CONFIRM_POLLS polls consecutifs
-(pas un seul) : dans un crash-loop ou le process reboote puis retombe, un unique poll
+lorsque l'uptime est CONFIRME stable sur CRASH_RESTART_CONFIRM_POLLS RAPPORTS D'ETAT
+DISTINCTS consecutifs (pas un seul ; et pas N GET /orders : le long-poll en fait ~4 par
+rapport, donc on compte les last_seen distincts, pas les appels) : dans un crash-loop ou le process reboote puis retombe, un unique poll
 process_up=True intermediaire ne doit pas desarmer le disjoncteur avant le prochain
 crash."""
 
@@ -25,6 +26,8 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from fastapi import Request
+
+from app.freshness import is_state_fresh
 
 logger = logging.getLogger(__name__)
 
@@ -44,25 +47,31 @@ async def auto_enqueue_crash_restarts(request: Request) -> None:
             if cfg.get("status") != "active" or not cfg.get("auto_restart_on_crash"):
                 continue
             state = snap["servers"].get(name) or {}
+            if not is_state_fresh(state):
+                continue  # etat absent/perime (agent muet) : pas de decision sur du perime
             process_up = state.get("process_up")
+            last_seen = state["last_seen"]
             info = await store.get_crash_recovery(name)
             attempts = info.get("attempts", [])
             breaker = info.get("breaker_tripped_at")
             streak = info.get("up_streak", 0)
+            counted = info.get("last_seen_counted")
 
             if process_up is True:
+                if last_seen == counted:
+                    continue  # meme rapport deja compte (GET /orders repete) : rien de neuf
                 streak += 1
                 if streak >= CRASH_RESTART_CONFIRM_POLLS:
-                    await store.clear_crash_recovery(name)
+                    await store.set_crash_recovery(name, [], None, 0, last_seen)
                 else:
-                    await store.set_crash_recovery(name, attempts, breaker, streak)
+                    await store.set_crash_recovery(name, attempts, breaker, streak, last_seen)
                 continue
             if process_up is not False:
                 continue  # jamais rapporte / inconnu : rien a decider
 
             if streak:
                 # la panne casse toute preuve de stabilite en cours d'accumulation
-                await store.set_crash_recovery(name, attempts, breaker, 0)
+                await store.set_crash_recovery(name, attempts, breaker, 0, counted)
             if desired_state.get(name) == "stopped":
                 continue  # arret volontaire, pas un crash -- attendre une action explicite
             if name in servers_with_pending:
@@ -77,7 +86,7 @@ async def auto_enqueue_crash_restarts(request: Request) -> None:
             attempts = [a for a in attempts if _within_window(a, cutoff)]
             if len(attempts) >= CRASH_RESTART_MAX_ATTEMPTS:
                 now = datetime.now(UTC).isoformat()
-                await store.set_crash_recovery(name, attempts, now, 0)
+                await store.set_crash_recovery(name, attempts, now, 0, counted)
                 from app.notify import send_alert
                 await send_alert(
                     request.app,
@@ -87,7 +96,7 @@ async def auto_enqueue_crash_restarts(request: Request) -> None:
                 logger.warning("auto-reboot %s : disjoncteur declenche", name)
                 continue
             attempts.append(datetime.now(UTC).isoformat())
-            await store.set_crash_recovery(name, attempts, None, 0)
+            await store.set_crash_recovery(name, attempts, None, 0, counted)
             await store.add_order(name, "start", author="auto-crash-recovery")
             logger.info("auto-reboot %s : ordre start cree (tentative %d/%d)",
                         name, len(attempts), CRASH_RESTART_MAX_ATTEMPTS)

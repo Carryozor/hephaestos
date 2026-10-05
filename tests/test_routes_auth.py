@@ -71,3 +71,83 @@ def test_login_success_resets_rate_limit(tmp_path):
     # apres un succes, un nouvel echec ne doit pas etre immediatement bloque (compteur remis a zero)
     r = client.post("/api/login", json={"username": username, "password": "mauvais"})
     assert r.status_code == 401
+
+
+# --- T2.1 : rate-limit non contournable par la concurrence ---------------------------
+
+async def _concurrent_client(tmp_path, password="correct horse battery"):
+    import httpx
+
+    from app import routes_auth
+    routes_auth._LOGIN_ATTEMPTS.clear()
+    app = make_app(tmp_path)
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=4)).decode()
+    await app.state.store.create_user("admin", hashed)
+    transport = httpx.ASGITransport(app=app, client=("1.2.3.4", 5555))
+    return httpx.AsyncClient(transport=transport, base_url="http://t")
+
+
+async def test_concurrent_wrong_logins_capped_by_rate_limit(tmp_path):
+    import asyncio
+    from collections import Counter
+    async with await _concurrent_client(tmp_path) as c:
+        rs = await asyncio.gather(*[
+            c.post("/api/login", json={"username": "admin", "password": f"faux-{i}-xxxxxxxx"})
+            for i in range(30)])
+    counts = Counter(r.status_code for r in rs)
+    assert counts[401] <= 5 and counts[401] + counts[429] == 30, counts
+
+
+async def test_valid_login_works_after_concurrent_flood_reset(tmp_path):
+    import asyncio
+
+    from app import routes_auth
+    async with await _concurrent_client(tmp_path) as c:
+        await asyncio.gather(*[
+            c.post("/api/login", json={"username": "admin", "password": f"faux-{i}-xxxxxxxx"})
+            for i in range(10)])
+        routes_auth._LOGIN_ATTEMPTS.clear()
+        r = await c.post("/api/login", json={"username": "admin",
+                                             "password": "correct horse battery"})
+    assert r.status_code == 200
+
+
+async def test_legit_user_failing_twice_then_succeeding_not_blocked(tmp_path):
+    async with await _concurrent_client(tmp_path) as c:
+        for _ in range(2):
+            r = await c.post("/api/login", json={"username": "admin", "password": "mauvais-mdp-xx"})
+            assert r.status_code == 401
+        ok = await c.post("/api/login", json={"username": "admin",
+                                              "password": "correct horse battery"})
+        assert ok.status_code == 200
+        # compteur remis a zero : 5 nouveaux echecs permis avant le 429
+        codes = [(await c.post("/api/login", json={"username": "admin",
+                                                    "password": "mauvais-mdp-xx"})).status_code
+                 for _ in range(6)]
+    assert codes == [401] * 5 + [429]
+
+
+async def test_concurrent_bcrypt_checks_are_bounded(tmp_path, monkeypatch):
+    import asyncio
+
+    from app import routes_auth
+    running = peak = 0
+
+    async def slow_verify(password, password_hash):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.02)
+        running -= 1
+        return False
+    monkeypatch.setattr(routes_auth, "verify_password", slow_verify)
+    routes_auth._LOGIN_ATTEMPTS.clear()
+    async with await _concurrent_client(tmp_path) as c:
+        # IPs distinctes : le rate-limit par IP ne masque pas la borne de concurrence
+        import httpx
+        async def one(i):
+            t = httpx.ASGITransport(app=c._transport.app, client=(f"9.9.9.{i}", 1))
+            async with httpx.AsyncClient(transport=t, base_url="http://t") as cc:
+                return await cc.post("/api/login", json={"username": "admin", "password": "x" * 12})
+        await asyncio.gather(*[one(i) for i in range(20)])
+    assert 1 <= peak <= routes_auth._MAX_CONCURRENT_CHECKS

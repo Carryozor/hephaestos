@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from tests.test_sanity import activate_all_servers
 
 TWO_SERVERS = {
     "palworld": {"display_name": "Palworld", "server_appid": 2394010, "workshop_appid": 1623730},
@@ -33,7 +34,7 @@ def make_app_two_servers(tmp_path):
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     settings = Settings(agent_token="agent-t", data_dir=tmp_path, servers=TWO_SERVERS)
-    return create_app(settings, http_client=client)
+    return activate_all_servers(create_app(settings, http_client=client))
 
 
 def login(app, username, password="testpass123"):

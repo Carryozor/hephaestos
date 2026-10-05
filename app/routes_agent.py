@@ -1,17 +1,16 @@
 import asyncio
 import json
-import logging
-from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
 
 from app.auth import require_agent
 from app.bepinex import refresh_all_bepinex_versions
 from app.crash_recovery import auto_enqueue_crash_restarts
 from app.game_updates import auto_enqueue_game_updates
 from app.mods import auto_enqueue_mod_updates
+from app.order_effects import build_done_effect
 
 router = APIRouter(prefix="/api/agent", dependencies=[Depends(require_agent)])
 
@@ -25,6 +24,42 @@ AGENT_ENTRY_MAX_BYTES = 4096
 # une valeur minuscule par les tests pour ne pas attendre en temps reel.
 LONG_POLL_MAX_WAIT_SECONDS = 50
 LONG_POLL_INTERVAL_SECONDS = 1.0
+
+
+# Bornes LARGES des rapports d'etat : au-dela, on TRONQUE (jamais de 422). Un rejet
+# ferait echouer tout le POST /state, l'agent paraitrait mort (last_seen fige, sonde
+# Kuma 503, auto-enqueue gele) alors qu'il fonctionne -- le rapport demesure est un
+# probleme de volume, pas une raison de perdre la totalite de l'etat.
+MAX_TEXT_CHARS = 500
+MAX_PLAYERS_LISTED = 1000
+MAX_BACKUPS = 500
+MAX_LIST_ITEMS = 2000
+MAX_MOD_ID_CHARS = 64
+MAX_AGENT_ENTRIES = 50
+
+
+def _cut_text(limit: int = MAX_TEXT_CHARS):
+    def cut(value):
+        return value[:limit] if isinstance(value, str) else value
+    return cut
+
+
+def _cut_list(limit: int):
+    def cut(value):
+        return value[:limit] if isinstance(value, list) else value
+    return cut
+
+
+def _cut_mod_ids(value):
+    """Ids de mods : tronque la LISTE ; un id demesure est ecarte (un id coupe serait
+    un autre id, pire qu'un id absent)."""
+    if not isinstance(value, list):
+        return value
+    return [v for v in value if not isinstance(v, str) or len(v) <= MAX_MOD_ID_CHARS][:MAX_LIST_ITEMS]
+
+
+# Chaine rapportee par l'agent : tronquee avant validation de type.
+BoundedText = Annotated[str, BeforeValidator(_cut_text())]
 
 
 class OrderResult(BaseModel):
@@ -54,17 +89,17 @@ class OrderResult(BaseModel):
 class PlayerInfo(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    id: str
-    name: str
-    steamid: str | None = None
+    id: BoundedText
+    name: BoundedText
+    steamid: BoundedText | None = None
 
 
 class SaveBackupInfo(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    file: str
+    file: BoundedText
     size_mb: float | None = None
-    created: str | None = None
+    created: BoundedText | None = None
 
 
 class ServerState(BaseModel):
@@ -73,11 +108,11 @@ class ServerState(BaseModel):
     buildid: str | None = Field(default=None, pattern=r"^\d{1,20}$")
     process_up: bool | None = None
     players: int | None = Field(default=None, ge=0, le=1000)
-    players_list: list[PlayerInfo] | None = None
-    installed_mod_ids: list[str] | None = None
-    save_backups: list[SaveBackupInfo] | None = None
-    process_started_at: str | None = None
-    rcon_info: str | None = None
+    players_list: Annotated[list[PlayerInfo], BeforeValidator(_cut_list(MAX_PLAYERS_LISTED))] | None = None
+    installed_mod_ids: Annotated[list[BoundedText], BeforeValidator(_cut_mod_ids)] | None = None
+    save_backups: Annotated[list[SaveBackupInfo], BeforeValidator(_cut_list(MAX_BACKUPS))] | None = None
+    process_started_at: BoundedText | None = None
+    rcon_info: BoundedText | None = None
     process_cpu_percent: float | None = Field(default=None, ge=0)
     process_mem_mb: float | None = Field(default=None, ge=0)
 
@@ -86,10 +121,11 @@ class StateReport(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     servers: dict[str, ServerState]
-    agent_version: str | None = Field(default=None, max_length=20)
-    config_hash: str | None = Field(default=None, max_length=64)
-    config_servers: list[dict] | None = Field(default=None, max_length=50)
-    discovered_games: list[dict] | None = Field(default=None, max_length=50)
+    # anciennes bornes (20/64) conservees, mais par troncature et non par rejet
+    agent_version: Annotated[str, BeforeValidator(_cut_text(20))] | None = None
+    config_hash: Annotated[str, BeforeValidator(_cut_text(64))] | None = None
+    config_servers: Annotated[list[dict], BeforeValidator(_cut_list(MAX_AGENT_ENTRIES))] | None = None
+    discovered_games: Annotated[list[dict], BeforeValidator(_cut_list(MAX_AGENT_ENTRIES))] | None = None
 
 
 @router.get("/orders")
@@ -131,64 +167,21 @@ async def get_orders(request: Request, wait: int = 0):
 
 @router.post("/orders/{order_id}")
 async def report_order(request: Request, order_id: str, result: OrderResult):
-    order = await request.app.state.store.set_order_status(order_id, result.status, result.detail)
+    store = request.app.state.store
+    # statut + effet de bord registre persistes ATOMIQUEMENT (cf. Store.complete_order)
+    order = await store.complete_order(order_id, result.status, result.detail,
+                                       registry_effect=build_done_effect(result))
     if order is None:
         raise HTTPException(404, "ordre inconnu")
     if order.get("terminal_refused"):
         raise HTTPException(409, "ordre deja en etat terminal")
-    registry = request.app.state.store.registry
-    # Cycle de vie du déploiement : les transitions de statut du registre suivent
-    # les confirmations agent, jamais l'optimisme du backend.
-    if order["status"] == "done" and order["type"] in ("install_game", "scan_exe"):
-        await registry.update_entry(order["server"], {
-            "exe_candidates": list(result.exe_candidates or []),
-            "status": "awaiting_setup"})
-    if order["status"] == "done" and order["type"] == "setup_server":
-        await registry.update_entry(order["server"], {
-            "status": "active", "exe_candidates": None})
-    if order["status"] == "done" and order["type"] == "list_files":
-        current = (await registry.get(order["server"])) or {}
-        listing = dict(current.get("files_listing") or {})
-        listing[order["root"]] = list(result.files or [])
-        await registry.update_entry(order["server"], {"files_listing": listing})
-    if order["status"] == "done" and order["type"] == "read_file":
-        await registry.update_entry(order["server"], {"file_read": {
-            "root": order["root"], "path": order["path"],
-            "content_b64": result.content_b64, "sha256": result.sha256,
-            # horodatage consomme par purge_stale_file_reads : ce bloc contient un
-            # secret en clair (AdminPassword) et ne doit pas survivre au-dela du TTL.
-            "read_at": datetime.now(UTC).isoformat()}})
     if order["status"] == "done" and order["type"] == "update_bepinex_mods":
-        # Revue securite du 12/09/2026 (M2) : ne persiste que les slugs qui
-        # appartenaient reellement a CET ordre -- un agent qui rapporterait un
-        # slug hors de l'ordre traite ne doit jamais pouvoir ecraser le
-        # bookkeeping (installed_paths) d'un AUTRE mod, qui serait ensuite
-        # passe en previous_paths a une future suppression (Remove-BepInExPaths).
-        ordered_slugs = {m.get("slug") for m in (order.get("mods") or [])}
-        for entry in (result.bepinex_installed or []):
-            if entry.get("slug") not in ordered_slugs:
-                logging.getLogger(__name__).warning(
-                    "update_bepinex_mods [%s]: slug '%s' hors de l'ordre traite, ignore",
-                    order["server"], entry.get("slug"))
-                continue
-            try:
-                await request.app.state.store.bepinex.set_installed(
-                    order["server"], entry.get("slug"),
-                    version=entry.get("version"), paths=list(entry.get("paths") or []),
-                )
-            except (ValueError, TypeError, KeyError):
-                # Chemin invalide ou entree mal formee rapportee par l'agent (source
-                # non fiable, P5) : ignoree plutot que de faire echouer tout le
-                # rapport -- les autres mods du meme ordre restent persistes.
-                logging.getLogger(__name__).warning(
-                    "update_bepinex_mods [%s]: entree bepinex_installed ignoree (invalide): %r",
-                    order["server"], entry)
         # Filet de securite (incident du 18/09/2026, root cause jamais reproduite
         # avec certitude malgre investigation approfondie) : un ordre rapporte
         # "done" dont le contenu REEL du store ne correspond pas a la version
         # demandee doit etre visible, jamais silencieux -- sans ca le dashboard
         # peut mentir indefiniment sur l'etat reel des mods installes.
-        current = await request.app.state.store.bepinex.all(order["server"])
+        current = await store.bepinex.all(order["server"])
         drifted = [m["slug"] for m in (order.get("mods") or [])
                   if (current.get(m["slug"]) or {}).get("installed_version") != m.get("version")]
         if drifted:

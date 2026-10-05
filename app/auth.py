@@ -1,13 +1,49 @@
+import asyncio
 import os
 import secrets
+import time
 
+import bcrypt
 from fastapi import HTTPException, Request, Response
 
 SESSION_COOKIE = "hephaestos_session"
 SESSION_TTL_DAYS = 30
 
-_PURGE_EVERY_N_CALLS = 50
-_purge_call_counter = 0
+# bcrypt 5 leve ValueError au-dela de 72 octets (il tronquait silencieusement avant).
+MAX_PASSWORD_BYTES = 72
+
+# Purge periodique (file_read, sessions) declenchee par l'horloge, pas par un compteur
+# d'appels : au plus une fois par _PURGE_INTERVAL_SECONDS. `_clock` est un point
+# d'injection pour les tests (ne pas patcher time.monotonic : la boucle asyncio s'en sert).
+_PURGE_INTERVAL_SECONDS = 60
+_clock = time.monotonic
+_last_purge_at: float | None = None
+
+# Hash factice (cout par defaut) : un login sur un utilisateur inconnu execute quand
+# meme un checkpw, pour que le temps de reponse ne revele pas l'existence du compte.
+DUMMY_PASSWORD_HASH = bcrypt.hashpw(b"hephaestos-dummy", bcrypt.gensalt()).decode()
+
+
+def check_password_bytes(value: str) -> str:
+    """Validator pydantic : refuse un mot de passe > 72 octets UTF-8 (limite bcrypt)."""
+    if len(value.encode()) > MAX_PASSWORD_BYTES:
+        raise ValueError(f"mot de passe trop long (max {MAX_PASSWORD_BYTES} octets UTF-8)")
+    return value
+
+
+async def hash_password(password: str) -> str:
+    """bcrypt hors event loop (~200 ms de CPU) : ne bloque pas les autres requetes."""
+    hashed = await asyncio.to_thread(bcrypt.hashpw, password.encode(), bcrypt.gensalt())
+    return hashed.decode()
+
+
+async def verify_password(password: str, password_hash: str) -> bool:
+    """bcrypt.checkpw hors event loop. Toute ValueError de bcrypt (mot de passe > 72
+    octets, hash malforme) = faux, jamais une exception (donc jamais un 500)."""
+    try:
+        return await asyncio.to_thread(bcrypt.checkpw, password.encode(), password_hash.encode())
+    except ValueError:
+        return False
 
 
 def set_session_cookie(response: Response, token: str) -> None:
@@ -29,11 +65,11 @@ async def require_admin(request: Request, response: Response) -> None:
     revoque ses sessions, mais on re-verifie quand meme que le compte existe.
     NB : historiquement cette dependance s'appelle require_admin (= "session du
     dashboard") ; le role admin au sens gestion des comptes = require_admin_role."""
-    global _purge_call_counter
+    global _last_purge_at
     store = request.app.state.store
-    _purge_call_counter += 1
-    if _purge_call_counter >= _PURGE_EVERY_N_CALLS:
-        _purge_call_counter = 0
+    now = _clock()
+    if _last_purge_at is None or now - _last_purge_at >= _PURGE_INTERVAL_SECONDS:
+        _last_purge_at = now
         await store.purge_expired_sessions()
         await store.purge_orphan_sessions()
         await store.registry.purge_stale_file_reads()

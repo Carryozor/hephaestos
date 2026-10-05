@@ -31,9 +31,9 @@ def test_list_files_save_root_requires_save_dir(tmp_path):
 
 
 def test_list_files_rejects_inactive_server(tmp_path):
-    # palworld est "disabled" par defaut dans ce fixture (aucun etat agent jamais
-    # rapporte) -- exactement le cas qu'on veut tester ici, aucune activation.
+    # le fixture partage est actif (B2.4) : on desactive explicitement palworld ici.
     c = make_logged_in_client(tmp_path)
+    asyncio.run(c.app.state.store.registry.update_entry("palworld", {"status": "disabled"}))
     r = c.post("/api/servers/palworld/files/list", json={"root": "install"})
     assert r.status_code == 409
 

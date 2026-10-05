@@ -13,11 +13,25 @@ def make_settings(tmp_path):
     return Settings(agent_token="agent-t",
                     data_dir=tmp_path, servers={"palworld": {"display_name": "Palworld", "server_appid": 2394010}})
 
+def activate_all_servers(app):
+    """Le registre seede les serveurs jamais rapportes en "disabled" ; B2.4 refuse les
+    ordres d'execution sur un serveur non actif : les fixtures d'ordres partent d'un
+    registre ACTIF (les tests de statut non actif le fixent explicitement)."""
+    # synchrone a dessein (_load/_dump, sans verrou) : appelable aussi depuis un test
+    # async, ou asyncio.run() est interdit ; l'app ne sert encore aucune requete.
+    store = app.state.store
+    data = store._load()
+    for entry in data.get("servers_registry", {}).values():
+        entry["status"] = "active"
+    store._dump(data)
+    return app
+
+
 def make_app(tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=STEAM_JSON)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return create_app(make_settings(tmp_path), http_client=client)
+    return activate_all_servers(create_app(make_settings(tmp_path), http_client=client))
 
 def make_logged_in_client(tmp_path, username="tester", password="testpass123"):
     """Cree un utilisateur directement via le Store puis se logue via l'API.

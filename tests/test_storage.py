@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.storage import OrderConflict, Store
+from app.storage import OrderConflict, Store, hash_session_token
 
 
 async def test_add_order_reject_if_blocks_second_matching_order(tmp_path):
@@ -97,7 +97,7 @@ async def test_session_expired_returns_none(tmp_path):
     token = await s.create_session("admin", ttl_days=30)
     # on retro-date manuellement l'expiration dans le fichier pour simuler l'expiration
     data = json.loads(p.read_text())
-    data["sessions"][token]["expires"] = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    data["sessions"][hash_session_token(token)]["expires"] = (datetime.now(UTC) - timedelta(days=1)).isoformat()
     p.write_text(json.dumps(data))
     assert await s.get_session(token) is None
 
@@ -108,7 +108,7 @@ async def test_renew_session_extends_expiry_when_worthwhile(tmp_path):
     token = await s.create_session("admin", ttl_days=30)
     # session vieillie artificiellement : il ne reste que 2 jours
     data = json.loads(p.read_text())
-    data["sessions"][token]["expires"] = (datetime.now(UTC) + timedelta(days=2)).isoformat()
+    data["sessions"][hash_session_token(token)]["expires"] = (datetime.now(UTC) + timedelta(days=2)).isoformat()
     p.write_text(json.dumps(data))
     await s.renew_session(token, ttl_days=30)
     after = datetime.fromisoformat((await s.get_session(token))["expires"])
@@ -137,7 +137,7 @@ async def test_purge_expired_sessions(tmp_path):
     token_expired = await s.create_session("bob", ttl_days=30)
     # retro-date manuellement l'expiration du token bob
     data = json.loads(p.read_text())
-    data["sessions"][token_expired]["expires"] = "2020-01-01T00:00:00+00:00"
+    data["sessions"][hash_session_token(token_expired)]["expires"] = "2020-01-01T00:00:00+00:00"
     p.write_text(json.dumps(data))
 
     removed = await s.purge_expired_sessions()
@@ -146,8 +146,8 @@ async def test_purge_expired_sessions(tmp_path):
     assert await s.get_session(token_expired) is None
     # verifie que la session expiree a bien disparu du fichier (pas juste ignoree en lecture)
     remaining = json.loads(p.read_text())["sessions"]
-    assert token_expired not in remaining
-    assert token_valid in remaining
+    assert hash_session_token(token_expired) not in remaining
+    assert hash_session_token(token_valid) in remaining
 
 
 async def test_purge_expired_sessions_no_op_when_none_expired(tmp_path):
@@ -756,7 +756,7 @@ async def test_purge_orphan_sessions_removes_sessions_without_user(tmp_path):
     removed = await s.purge_orphan_sessions()
     assert removed == 1
     remaining = s._load()["sessions"]
-    assert tok_valid in remaining and "e2e_orphan" not in remaining
+    assert hash_session_token(tok_valid) in remaining and "e2e_orphan" not in remaining
 
 
 async def test_purge_orphan_sessions_no_op_when_all_valid(tmp_path):
@@ -810,3 +810,146 @@ async def test_dump_fsyncs_file_and_dir(tmp_path, monkeypatch):
     # au moins un fsync fichier + un fsync repertoire
     assert calls["n"] >= 2
     assert (await s.snapshot())["servers"]["pal"]["up"] is True
+
+
+async def test_crash_recovery_legacy_entry_without_last_seen_counted_reads_none(tmp_path):
+    path = tmp_path / "s.json"
+    s = Store(path)
+    data = json.loads(path.read_text())
+    data["crash_recovery"] = {"palworld": {"attempts": ["x"], "breaker_tripped_at": None, "up_streak": 1}}
+    path.write_text(json.dumps(data))
+    info = await s.get_crash_recovery("palworld")
+    assert info["last_seen_counted"] is None and info["up_streak"] == 1 and info["attempts"] == ["x"]
+
+
+async def test_crash_recovery_set_get_roundtrip_and_clear_keeps_last_seen_counted(tmp_path):
+    s = Store(tmp_path / "s.json")
+    await s.set_crash_recovery("palworld", ["a"], None, 1, "2026-10-05T10:00:00+00:00")
+    assert (await s.get_crash_recovery("palworld"))["last_seen_counted"] == "2026-10-05T10:00:00+00:00"
+    await s.clear_crash_recovery("palworld")
+    info = await s.get_crash_recovery("palworld")
+    assert info["attempts"] == [] and info["up_streak"] == 0
+    assert info["last_seen_counted"] == "2026-10-05T10:00:00+00:00"
+
+
+async def test_update_player_sessions_none_leaves_sessions_untouched(tmp_path):
+    s = Store(tmp_path / "s.json")
+    await s.update_player_sessions("palworld", [{"id": "1", "name": "Alice", "steamid": None}])
+    await s.update_player_sessions("palworld", None)
+    assert "1" in await s.get_player_sessions("palworld")
+    assert (await s.get_connection_log("palworld"))[0]["disconnected_at"] is None
+
+
+async def test_update_player_sessions_empty_list_closes_all_sessions(tmp_path):
+    s = Store(tmp_path / "s.json")
+    await s.update_player_sessions("palworld", [{"id": "1", "name": "Alice", "steamid": None}])
+    await s.update_player_sessions("palworld", [])
+    assert await s.get_player_sessions("palworld") == {}
+    assert (await s.get_connection_log("palworld"))[0]["disconnected_at"] is not None
+
+
+async def test_complete_order_persists_status_and_registry_effect_together(tmp_path):
+    path = tmp_path / "s.json"
+    s = Store(path)
+    await s.registry.create_entry("vrising", "V Rising", 1829350, "installing")
+    o = await s.add_order("vrising", "install_game", {"appid": 1829350})
+    dumps = []
+    real_dump = s._dump
+    s._dump = lambda data: (dumps.append(1), real_dump(data))[1]
+
+    def effect(data, order):
+        data["servers_registry"][order["server"]].update({"status": "awaiting_setup"})
+
+    res = await s.complete_order(o["id"], "done", "ok", registry_effect=effect)
+    assert res["status"] == "done"
+    assert len(dumps) == 1  # UN seul _dump : statut et effet atomiques
+    persisted = json.loads(path.read_text())
+    assert persisted["servers_registry"]["vrising"]["status"] == "awaiting_setup"
+    assert [x["status"] for x in persisted["orders"]] == ["done"]
+
+
+async def test_complete_order_effect_exception_persists_neither_status_nor_effect(tmp_path):
+    path = tmp_path / "s.json"
+    s = Store(path)
+    await s.registry.create_entry("vrising", "V Rising", 1829350, "installing")
+    o = await s.add_order("vrising", "install_game", {"appid": 1829350})
+
+    def boom(data, order):
+        data["servers_registry"]["vrising"]["status"] = "awaiting_setup"  # mutation partielle
+        raise RuntimeError("effet casse")
+
+    with pytest.raises(RuntimeError):
+        await s.complete_order(o["id"], "done", "ok", registry_effect=boom)
+    persisted = json.loads(path.read_text())
+    assert persisted["servers_registry"]["vrising"]["status"] == "installing"
+    assert persisted["orders"][0]["status"] == "pending"
+    # le verrou est bien relache : l'ordre reste completable (l'agent peut re-rapporter)
+    assert (await s.complete_order(o["id"], "done", "ok"))["status"] == "done"
+
+
+async def test_complete_order_effect_skipped_unless_done(tmp_path):
+    s = Store(tmp_path / "s.json")
+    o = await s.add_order("palworld", "restart")
+    called = []
+    await s.complete_order(o["id"], "failed", "ko", registry_effect=lambda d, od: called.append(1))
+    assert called == []
+
+
+async def test_complete_order_terminal_refused_does_not_run_effect(tmp_path):
+    s = Store(tmp_path / "s.json")
+    o = await s.add_order("palworld", "restart")
+    await s.complete_order(o["id"], "done")
+    called = []
+    res = await s.complete_order(o["id"], "done", registry_effect=lambda d, od: called.append(1))
+    assert res["terminal_refused"] is True and called == []
+
+
+async def test_complete_order_still_purges_order_content_on_terminal_status(tmp_path):
+    # garantie B1.4 conservee : contenu write_file purge au statut terminal
+    s = Store(tmp_path / "s.json")
+    o = await s.add_order("palworld", "write_file", {"content_b64": "c2VjcmV0", "expected_sha256": "0" * 64})
+    res = await s.complete_order(o["id"], "done", "ok")
+    assert "content_b64" not in res and "expected_sha256" not in res
+
+
+async def test_set_order_status_remains_a_working_wrapper(tmp_path):
+    s = Store(tmp_path / "s.json")
+    o = await s.add_order("palworld", "stop")
+    assert (await s.set_order_status(o["id"], "done"))["status"] == "done"
+    assert (await s.snapshot())["servers_desired_state"]["palworld"] == "stopped"
+
+
+# --- T2.3 : purge de rattrapage du contenu des ordres deja termines ---
+
+def _legacy_order(status, **extra):
+    return {"id": f"o-{status}", "server": "palworld", "type": "write_file", "status": status,
+            "created": datetime.now(UTC).isoformat(), "detail": None, "author": "boss",
+            "content_b64": "c2VjcmV0", "expected_sha256": "ab" * 32, "path": "x.ini", **extra}
+
+
+async def test_groom_strips_content_of_already_terminal_orders_and_persists(tmp_path):
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"servers": {}, "orders": [
+        _legacy_order("done"), _legacy_order("failed"),
+        {**_legacy_order("pending"), "id": "o-p"}, {**_legacy_order("running"), "id": "o-r"}],
+        "users": {}, "sessions": {}, "sessions_hashed": True}))
+    p.chmod(0o644)
+    s = Store(p)
+    await s.pending_orders()  # declenche le groom
+    assert (p.stat().st_mode & 0o777) == 0o600  # le fichier reecrit n'est plus lisible par tous
+    on_disk = {o["id"]: o for o in json.loads(p.read_text())["orders"]}
+    for oid in ("o-done", "o-failed"):
+        assert "content_b64" not in on_disk[oid] and "expected_sha256" not in on_disk[oid]
+        assert on_disk[oid]["path"] == "x.ini"  # seul le contenu part
+    for oid in ("o-p", "o-r"):
+        assert on_disk[oid]["content_b64"] == "c2VjcmV0"
+        assert on_disk[oid]["expected_sha256"] == "ab" * 32
+
+
+async def test_groom_strip_also_runs_on_add_order(tmp_path):
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"servers": {}, "orders": [_legacy_order("done")],
+                             "users": {}, "sessions": {}, "sessions_hashed": True}))
+    s = Store(p)
+    await s.add_order("palworld", "update")
+    assert "content_b64" not in json.loads(p.read_text())["orders"][0]

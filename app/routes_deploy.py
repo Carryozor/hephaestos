@@ -13,11 +13,11 @@ côté agent. Le payload install_game ne porte donc que {appid}.
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.auth import require_admin_role
 from app.known_servers import search_known
-from app.routes_admin import RconUpdate
+from app.routes_admin import RconUpdate, check_save_dir, check_token
 from app.storage import OrderConflict
 
 router = APIRouter(prefix="/api/deploy", dependencies=[Depends(require_admin_role)])
@@ -127,6 +127,8 @@ class SetupRequest(BaseModel):
     stop_warn_seconds: int | None = Field(default=None, ge=0, le=600)
     start_now: bool = False
 
+    _check_save_dir = field_validator("save_dir")(check_save_dir)
+
 
 class AdoptRequest(BaseModel):
     appid: int = Field(ge=1, le=99999999)
@@ -177,6 +179,12 @@ async def setup_server(request: Request, name: str, body: SetupRequest):
     process = body.exe_path.replace("/", "\\").rsplit("\\", 1)[-1]
     if process.lower().endswith(".exe"):
         process = process[:-4]
+    # derive d'une valeur fournie par le client : meme liste blanche que le registre,
+    # verifiee AVANT toute ecriture (sinon l'agent ecarterait le serveur entier).
+    try:
+        check_token(process)
+    except ValueError as exc:
+        raise HTTPException(422, f"nom de process derive de exe_path invalide : {exc}") from None
 
     fields: dict = {"process": process, "start_task": name, "exe_path": body.exe_path,
               "launch_args": body.launch_args or None, "stop_adapter": body.stop_adapter,

@@ -1,12 +1,18 @@
+import asyncio
 import time
 from pathlib import Path
 
-import bcrypt
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.auth import SESSION_COOKIE, SESSION_TTL_DAYS, set_session_cookie
+from app.auth import (
+    DUMMY_PASSWORD_HASH,
+    SESSION_COOKIE,
+    SESSION_TTL_DAYS,
+    set_session_cookie,
+    verify_password,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -15,6 +21,19 @@ router = APIRouter()
 _LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 _MAX_ATTEMPTS = 5
 _WINDOW_SECONDS = 300
+# Borne les checkpw bcrypt simultanes (chacun occupe un thread ~100 ms de CPU) : sans
+# elle, une rafale de logins sature le pool de threads par defaut. Semaphore cree
+# paresseusement et lie a la boucle courante (pas de liaison au chargement du module).
+_MAX_CONCURRENT_CHECKS = 4
+_check_semaphore: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
+
+
+def _bcrypt_semaphore() -> asyncio.Semaphore:
+    global _check_semaphore
+    loop = asyncio.get_running_loop()
+    if _check_semaphore is None or _check_semaphore[0] is not loop:
+        _check_semaphore = (loop, asyncio.Semaphore(_MAX_CONCURRENT_CHECKS))
+    return _check_semaphore[1]
 
 
 def _is_rate_limited(ip: str) -> bool:
@@ -48,10 +67,18 @@ async def login(request: Request, response: Response, body: LoginRequest):
     if _is_rate_limited(client_ip):
         raise HTTPException(429, "trop de tentatives, reessayez dans quelques minutes")
 
+    # Creneau reserve SYNCHRONEMENT, avant tout await : verify_password cede la boucle,
+    # et enregistrer l'echec apres laisserait N requetes simultanees passer le test
+    # ci-dessus avant qu'un seul echec soit compte. Efface sur succes.
+    _record_failed_attempt(client_ip)
+
     store = request.app.state.store
     user = await store.get_user(body.username)
-    if user is None or not bcrypt.checkpw(body.password.encode(), user["password_hash"].encode()):
-        _record_failed_attempt(client_ip)
+    # utilisateur inconnu : checkpw factice pour egaliser le temps de reponse
+    password_hash = user["password_hash"] if user is not None else DUMMY_PASSWORD_HASH
+    async with _bcrypt_semaphore():
+        password_ok = await verify_password(body.password, password_hash)
+    if user is None or not password_ok:
         raise HTTPException(401, "identifiants invalides")
 
     _reset_attempts(client_ip)

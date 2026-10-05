@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request, Response
 
+from app.freshness import STATE_STALE_SECONDS, is_state_fresh
+
 router = APIRouter()
 
 Sample = tuple[dict[str, str], float]
@@ -42,6 +44,7 @@ async def metrics(request: Request) -> Response:
     uptime: list[Sample] = []
     update_available: list[Sample] = []
     breaker: list[Sample] = []
+    stale: list[Sample] = []
     orders_by_server: list[Sample] = []
 
     for name, cfg in registry.items():
@@ -54,10 +57,15 @@ async def metrics(request: Request) -> Response:
 
         state = snap["servers"].get(name)
         if state is None:
+            stale.append((labels, 0))  # jamais rapporte : pas "perime", simplement inconnu
             continue
-        if state.get("process_up") is not None:
+        # etat perime (agent muet) : up/players/uptime seraient des valeurs figees qui
+        # mentent a Prometheus -> series omises, et un drapeau explicite a la place.
+        is_stale = not is_state_fresh(state, STATE_STALE_SECONDS)
+        stale.append((labels, 1 if is_stale else 0))
+        if not is_stale and state.get("process_up") is not None:
             up.append((labels, 1 if state["process_up"] else 0))
-        if state.get("players") is not None:
+        if not is_stale and state.get("players") is not None:
             players.append((labels, state["players"]))
         if state.get("process_cpu_percent") is not None:
             cpu.append((labels, state["process_cpu_percent"]))
@@ -65,9 +73,14 @@ async def metrics(request: Request) -> Response:
             mem.append((labels, state["process_mem_mb"]))
 
         started = state.get("process_started_at")
-        if started and state.get("process_up"):
-            started_dt = datetime.fromisoformat(started)
-            uptime.append((labels, int((datetime.now(UTC) - started_dt).total_seconds())))
+        if not is_stale and started and state.get("process_up"):
+            try:
+                started_dt = datetime.fromisoformat(started)
+                if started_dt.tzinfo is None:
+                    started_dt = started_dt.replace(tzinfo=UTC)
+                uptime.append((labels, int((datetime.now(UTC) - started_dt).total_seconds())))
+            except (ValueError, TypeError):
+                pass  # valeur malformee rapportee par l'agent : serie omise, pas de 500
 
         local = state.get("buildid")
         public = await steam.public_buildid(cfg["server_appid"])
@@ -79,6 +92,8 @@ async def metrics(request: Request) -> Response:
                 "Process reporte up (1) ou down (0) par l'agent.", up),
         _render("hephaestos_server_players",
                 "Nombre de joueurs connectes.", players),
+        _render("hephaestos_server_state_stale",
+                "1 si le dernier rapport d'etat agent est perime (up/players/uptime omis).", stale),
         _render("hephaestos_server_cpu_percent",
                 "CPU du process, pourcentage rapporte par l'agent.", cpu),
         _render("hephaestos_server_mem_mb",

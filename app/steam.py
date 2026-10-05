@@ -1,35 +1,46 @@
 import time
+from collections.abc import Callable
 
 import httpx
 
 CACHE_TTL_SECONDS = 900
+# Cache negatif : un echec reseau (timeout 15 s) est memorise ce temps-la, sinon chaque
+# appel (poll agent, /metrics, liste serveurs) re-attend le timeout tant que Steam est KO.
+NEGATIVE_CACHE_SECONDS = 60
 API_URL = "https://api.steamcmd.net/v1/info/{appid}"
 
 
 class SteamBuildIds:
-    def __init__(self, client: httpx.AsyncClient):
+    def __init__(self, client: httpx.AsyncClient, clock: Callable[[], float] = time.monotonic):
         self._client = client
+        self._clock = clock  # injectable pour les tests
+        self._failed_at: dict[int, float] = {}
         self._cache: dict[int, tuple[float, str]] = {}
         self._name_cache: dict[int, tuple[float, str]] = {}
 
     async def public_buildid(self, appid: int) -> str | None:
-        now = time.monotonic()
+        now = self._clock()
         hit = self._cache.get(appid)
         if hit and now - hit[0] < CACHE_TTL_SECONDS:
             return hit[1]
+        failed_at = self._failed_at.get(appid)
+        if failed_at is not None and now - failed_at < NEGATIVE_CACHE_SECONDS:
+            return hit[1] if hit else None  # echec recent : derniere valeur connue, pas de retry
         try:
             resp = await self._client.get(API_URL.format(appid=appid), timeout=15)
             resp.raise_for_status()
             buildid = resp.json()["data"][str(appid)]["depots"]["branches"]["public"]["buildid"]
         except (httpx.HTTPError, KeyError, TypeError, ValueError):
+            self._failed_at[appid] = now
             return hit[1] if hit else None
+        self._failed_at.pop(appid, None)
         self._cache[appid] = (now, buildid)
         return buildid
 
     async def public_app_name(self, appid: int) -> str | None:
         """Nom public de l'app (pré-remplissage du wizard de déploiement).
         Échec = None, jamais d'exception : le lookup est un confort, pas un prérequis."""
-        now = time.monotonic()
+        now = self._clock()
         hit = self._name_cache.get(appid)
         if hit and now - hit[0] < CACHE_TTL_SECONDS:
             return hit[1]

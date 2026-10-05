@@ -1,7 +1,8 @@
+import re
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app import bepinex as bepinex_service
 from app import mods
@@ -76,10 +77,26 @@ async def list_servers(request: Request):
     return result
 
 
+# Statuts de registre ou aucun ordre d'EXECUTION n'a de sens : le serveur n'est pas (ou
+# plus) exploitable. Un status absent (entree heritee) compte comme actif. Les ordres de
+# deploiement (install_game/scan_exe/setup_server, routes_deploy) ne passent PAS par ici.
+NON_EXECUTABLE_STATUSES = frozenset({"installing", "awaiting_setup", "disabled"})
+
+
+async def _require_executable_server(store, name: str) -> dict:
+    """404 si inconnu, 409 si le serveur n'est pas actif ; retourne l'entree de registre."""
+    cfg = (await store.registry.all()).get(name)
+    if cfg is None:
+        raise HTTPException(404, "serveur inconnu")
+    status = cfg.get("status")
+    if status in NON_EXECUTABLE_STATUSES:
+        raise HTTPException(409, f"serveur non actif (statut : {status}) : ordre refuse")
+    return cfg
+
+
 async def _create_order(request: Request, name: str, type_: str):
     store = request.app.state.store
-    if name not in await store.registry.all():
-        raise HTTPException(404, "serveur inconnu")
+    await _require_executable_server(store, name)
     try:
         return await store.add_order(name, type_, author=request.state.user["username"],
                                      reject_if=lambda o: True)
@@ -122,7 +139,9 @@ async def cancel_order(request: Request, name: str, order_id: str):
         raise HTTPException(409, "ordre deja en cours d'execution, annulation impossible")
     if cancelled["type"] == "install_mod" and cancelled.get("workshop_id"):
         await store.mods.remove_mod_metadata_if_never_installed(name, cancelled["workshop_id"])
-    return cancelled
+    # reponse minimale : l'ordre complet peut porter content_b64 (write_file), que
+    # le role user ne doit pas relire
+    return {k: cancelled.get(k) for k in ("id", "type", "status", "detail", "server")}
 
 
 @router.get("/{name}/players")
@@ -218,8 +237,7 @@ class RestoreSaveRequest(BaseModel):
 @router.post("/{name}/saves/backup", status_code=201)
 async def backup_save(request: Request, name: str):
     store = request.app.state.store
-    if name not in await store.registry.all():
-        raise HTTPException(404, "serveur inconnu")
+    await _require_executable_server(store, name)
     try:
         return await store.add_order(name, "backup", author=request.state.user["username"],
                                      reject_if=lambda o: True)
@@ -232,8 +250,7 @@ async def restore_save(request: Request, name: str, body: RestoreSaveRequest):
     store = request.app.state.store
     if request.state.user["role"] != "admin":
         raise HTTPException(403, "restauration reservee aux administrateurs")
-    if name not in await store.registry.all():
-        raise HTTPException(404, "serveur inconnu")
+    await _require_executable_server(store, name)
     # seul un backup effectivement rapporte par l'agent est restaurable : pas
     # d'ordre aveugle vers un fichier arbitraire
     snap = await store.snapshot()
@@ -291,6 +308,7 @@ async def preview_mod(request: Request, name: str, body: ModPreviewRequest):
 async def install_mod(request: Request, name: str, body: ModInstallRequest):
     cfg = await _require_workshop_server(request, name)
     store = request.app.state.store
+    await _require_executable_server(store, name)
     # Revalidation serveur -- ne jamais faire confiance au payload client meme si
     # /mods/preview a deja ete appele juste avant.
     info = await _fetch_workshop_item(request, cfg["workshop_appid"], body.workshop_id)
@@ -309,6 +327,7 @@ async def install_mod(request: Request, name: str, body: ModInstallRequest):
 @router.post("/{name}/mods/update-all")
 async def update_all_mods(request: Request, name: str):
     await _require_workshop_server(request, name)
+    await _require_executable_server(request.app.state.store, name)
     return await mods.enqueue_mod_update_orders(request, name, include_unknown_dates=True,
                                                 author=request.state.user["username"])
 
@@ -323,6 +342,7 @@ async def remove_mod(request: Request, name: str,
     # de son cote (defense en profondeur), mais la borne d'entree ne doit pas manquer ici.
     await _require_workshop_server(request, name)
     store = request.app.state.store
+    await _require_executable_server(store, name)
 
     await store.mods.remove_mod_metadata_if_never_installed(name, workshop_id)
     try:
@@ -341,10 +361,49 @@ class RconUpdate(BaseModel):
     announce_command: str | None = Field(default=None, max_length=200)
 
 
+# Valeurs ecrites au registre puis reutilisees par l'agent Windows dans des commandes
+# (nom de tache planifiee, nom de process) : liste BLANCHE, la MEME que Test-HephSafeName
+# cote agent (lettres/chiffres Unicode, _, espace, . - et \ pour une tache dans un
+# dossier). Un ecart ferait accepter ici une valeur que l'agent rejette (et qui lui
+# ferait ecarter tout le serveur), ou l'inverse. Reste a modifier des DEUX cotes.
+_SAFE_TOKEN = re.compile(r"[\w .\\-]+")
+TOKEN_MAX_LENGTH = 100
+_DRIVE_LETTER = re.compile(r"^[A-Za-z]:")
+
+
+def check_token(value: str | None) -> str | None:
+    """Validator start_task/process : liste blanche alignee sur l'agent, 1..100 car."""
+    if value is not None and (not 1 <= len(value) <= TOKEN_MAX_LENGTH
+                              or _SAFE_TOKEN.fullmatch(value) is None):
+        raise ValueError("start_task/process : 1 a 100 caracteres parmi lettres, chiffres, "
+                         "espace, _ . - \\")
+    return value
+
+
+def check_save_dir(value: str | None) -> str | None:
+    """Validator save_dir : relatif strict a l'install (cf. Get-GameSaveDir cote agent) --
+    ni chemin absolu, ni lecteur, ni UNC, ni segment vide/'.'/'..' ou finissant par
+    espace/point, ni NUL/retour ligne."""
+    if value is None:
+        return value
+    if re.search(r"[\x00-\x1f\x7f]", value):
+        raise ValueError("save_dir : caracteres de controle interdits")
+    normalized = value.replace("\\", "/")
+    if normalized.startswith("/") or _DRIVE_LETTER.match(normalized):
+        raise ValueError("save_dir doit etre relatif (ni absolu, ni lecteur, ni UNC)")
+    for segment in normalized.split("/"):
+        if segment in ("", ".", ".."):
+            raise ValueError("save_dir : segment vide, '.' ou '..' interdit")
+        # Windows ignore l'espace/point final : "a." et "a" designeraient le meme dossier
+        if segment.endswith((" ", ".")):
+            raise ValueError("save_dir : segment finissant par un espace ou un point interdit")
+    return value
+
+
 class RegistryUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=60)
     status: str | None = Field(default=None, pattern="^(active|disabled)$")
-    process: str | None = Field(default=None, max_length=200)
+    process: str | None = Field(default=None, max_length=TOKEN_MAX_LENGTH)
     start_task: str | None = Field(default=None, max_length=100)
     launch_args: str | None = Field(default=None, max_length=500)
     stop_adapter: str | None = Field(default=None,
@@ -355,6 +414,9 @@ class RegistryUpdate(BaseModel):
     stop_warn_seconds: int | None = Field(default=None, ge=0, le=600)
     kuma_maj_push: str | None = Field(default=None, max_length=300)
     auto_restart_on_crash: bool | None = None
+
+    _check_tokens = field_validator("process", "start_task")(check_token)
+    _check_save_dir = field_validator("save_dir")(check_save_dir)
 
 
 def _masked_registry_entry(entry: dict) -> dict:
