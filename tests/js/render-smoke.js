@@ -208,12 +208,12 @@ if ((updHtml.match(/mod-status mod-unknown-date/g) || []).length !== 1) {
 if ((updHtml.match(/>mettre à jour</g) || []).length !== 2) {
   console.error("mods : bouton attendu sur mod perime + mod legacy sans installed_at"); process.exit(1);
 }
-if (!updHtml.includes("updateMod('palworld', '11')") || !updHtml.includes("updateMod('palworld', '12')")) {
+if (!updHtml.includes("updateMod(&quot;palworld&quot;, &quot;11&quot;)") || !updHtml.includes("updateMod(&quot;palworld&quot;, &quot;12&quot;)")) {
   console.error("mods : le bouton doit cibler updateMod avec le bon id"); process.exit(1);
 }
 
 // --- mods : bouton global "tout mettre a jour" ---
-if (!updHtml.includes("tout mettre à jour") || !updHtml.includes("updateAllMods('palworld')")) {
+if (!updHtml.includes("tout mettre à jour") || !updHtml.includes("updateAllMods(&quot;palworld&quot;)")) {
   console.error("mods : bouton tout mettre a jour absent alors que des mods le necessitent"); process.exit(1);
 }
 const allUpToDate = {
@@ -295,10 +295,10 @@ documentStub.getElementById = origGetById2;
 if (!accountsEl.innerHTML.includes("gardien") || !accountsEl.innerHTML.includes("palworld")) {
   console.error("comptes : liste incomplete"); process.exit(1);
 }
-if (!accountsEl.innerHTML.includes("deleteAccount('gardien')")) {
+if (!accountsEl.innerHTML.includes("deleteAccount(&quot;gardien&quot;)")) {
   console.error("comptes : bouton supprimer absent pour un autre compte"); process.exit(1);
 }
-if (accountsEl.innerHTML.includes("deleteAccount('boss')")) {
+if (accountsEl.innerHTML.includes("deleteAccount(&quot;boss&quot;)")) {
   console.error("comptes : le bouton supprimer ne doit pas viser son propre compte"); process.exit(1);
 }
 
@@ -318,10 +318,10 @@ detailData.save_backups = [{ file: "20260717-020000-pre-update.zip", size_mb: 71
                              created: "2026-07-17T02:00:00+00:00" }];
 vm.runInContext(`currentUser = { username: "boss", role: "admin", servers: [] };`, sandbox);
 const savesAdmin = vm.runInContext("renderServerDetail", sandbox)(detailData, "palworld");
-if (!savesAdmin.includes("Sauvegardes") || !savesAdmin.includes("backupNow('palworld')")) {
+if (!savesAdmin.includes("Sauvegardes") || !savesAdmin.includes("backupNow(&quot;palworld&quot;)")) {
   console.error("saves : section ou bouton sauvegarder absent"); process.exit(1);
 }
-if (!savesAdmin.includes("restoreSave('palworld', '20260717-020000-pre-update.zip')")) {
+if (!savesAdmin.includes("restoreSave(&quot;palworld&quot;, &quot;20260717-020000-pre-update.zip&quot;)")) {
   console.error("saves : bouton restaurer absent pour un admin"); process.exit(1);
 }
 vm.runInContext(`currentUser = { username: "gardien", role: "user", servers: ["palworld"] };`, sandbox);
@@ -338,7 +338,7 @@ documentStub.getElementById = (id) => id === "accountsList" ? accountsEl2 : make
 vm.runInContext(`togglePasswordEditor("gardien")`, sandbox);
 documentStub.getElementById = origGetById3;
 if (!accountsEl2.innerHTML.includes('id="pw-input-gardien"')
-    || !accountsEl2.innerHTML.includes("saveAccountPassword('gardien')")) {
+    || !accountsEl2.innerHTML.includes("saveAccountPassword(&quot;gardien&quot;)")) {
   console.error("comptes : editeur de mot de passe inline absent"); process.exit(1);
 }
 if (appJs.includes("window.prompt") || appJs.includes("window.alert")) {
@@ -672,13 +672,13 @@ vm.runInContext("openModsPanels.delete('modstoggle')", sandbox);
   // XPortal a update_available:true dans bepinexServer -- bouton "mettre a jour"
   // attendu pour lui, PAS pour Jotunn (a jour). "tout mettre a jour" absent tant
   // qu'un seul mod a une maj dispo (seuil >1, meme motif que updateAllMods).
-  if (!bepinexDetailHtml.includes("updateBepInExMods('valheim', ['c/d'])")) {
+  if (!bepinexDetailHtml.includes("updateBepInExMods(&quot;valheim&quot;, [&quot;c/d&quot;])")) {
     throw new Error("plein ecran bepinex : bouton de mise a jour par mod absent");
   }
   if (bepinexDetailHtml.includes("tout mettre à jour")) {
     throw new Error("plein ecran bepinex : bouton 'tout mettre a jour' ne devrait pas apparaitre pour un seul mod en retard");
   }
-  if (!bepinexDetailHtml.includes("checkBepInExUpdates('valheim')")) {
+  if (!bepinexDetailHtml.includes("checkBepInExUpdates(&quot;valheim&quot;)")) {
     throw new Error("plein ecran bepinex : bouton de verification manuelle absent");
   }
 
@@ -695,7 +695,7 @@ vm.runInContext("openModsPanels.delete('modstoggle')", sandbox);
   sandbox.__bepinexServer = bepinexTwoUpdates;
   const bepinexTwoHtml = vm.runInContext(
     "renderDetailMods(__bepinexServer); detailMods.innerHTML", sandbox);
-  if (!bepinexTwoHtml.includes("tout mettre à jour (2)") || !bepinexTwoHtml.includes("updateBepInExMods('valheim', null)")) {
+  if (!bepinexTwoHtml.includes("tout mettre à jour (2)") || !bepinexTwoHtml.includes("updateBepInExMods(&quot;valheim&quot;, null)")) {
     throw new Error("plein ecran bepinex : bouton groupe absent avec 2 mods en retard");
   }
 

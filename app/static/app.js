@@ -89,6 +89,13 @@ function esc(v) {
   }[c]));
 }
 
+// Argument de handler inline (attribut onclick, etc.) : litteral JSON (= litteral JS valide)
+// puis echappement HTML. '${esc(x)}' est FAUX : le navigateur decode les entites de
+// l'attribut AVANT de parser le JS, donc ' ou " dans x sortirait de la chaine.
+function jsArg(v) {
+  return esc(JSON.stringify(v));
+}
+
 function relativeTime(iso) {
   if (!iso) return "jamais";
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -330,7 +337,7 @@ function renderCard(s) {
       ? ` · <span class="mods-toggle-count">redémarrage requis</span>`
       : "";
     modsBand = `
-      <div class="datarow clickable mods-toggle srow-band" onclick="toggleMods('${esc(s.name)}')"><span>${chevron}</span><span>mods : ${installedCount} installés${updatePart}${restartPart}</span></div>
+      <div class="datarow clickable mods-toggle srow-band" onclick="toggleMods(${jsArg(s.name)})"><span>${chevron}</span><span>mods : ${installedCount} installés${updatePart}${restartPart}</span></div>
       <div class="mods-detail${isOpen ? " open" : ""}" id="mods-detail-${esc(s.name)}">${renderModsSummary(s)}</div>
     `;
   }
@@ -347,7 +354,7 @@ function renderCard(s) {
       ? ` · <span class="mods-toggle-count">${needsUpdate} maj dispo</span>`
       : "";
     bepinexBand = `
-      <div class="datarow clickable mods-toggle bepinex-detail srow-band" onclick="toggleBepinex('${esc(s.name)}')"><span>${chevron}</span><span>mods BepInEx : ${mods.length} suivis${updatePart}</span></div>
+      <div class="datarow clickable mods-toggle bepinex-detail srow-band" onclick="toggleBepinex(${jsArg(s.name)})"><span>${chevron}</span><span>mods BepInEx : ${mods.length} suivis${updatePart}</span></div>
       <div class="mods-detail bepinex-detail${isOpen ? " open" : ""}" id="bepinex-detail-${esc(s.name)}">${renderBepInExSummary(s)}</div>
     `;
   }
@@ -356,7 +363,7 @@ function renderCard(s) {
     ? `<div class="pending">${queue.map((o) =>
         `${esc(o.type)} (${o.position}/${o.total} dans la file)` +
         (o.status === "pending"
-          ? ` <button class="cancel-order" onclick="cancelOrder('${esc(s.name)}', '${esc(o.id)}')" title="annuler cet ordre">✕</button>`
+          ? ` <button class="cancel-order" onclick="cancelOrder(${jsArg(s.name)}, ${jsArg(o.id)})" title="annuler cet ordre">✕</button>`
           : " — en cours")
       ).join("<br>")}</div>`
     : "";
@@ -372,7 +379,7 @@ function renderCard(s) {
   card.innerHTML = `
     <div class="name-group">${renderNameGroup(s)}</div>
     <span class="pill ${statusClass}"><span class="dot"></span>${esc(statusText)}</span>
-    <div class="datarow${clickablePlayers ? " clickable" : ""} mono"${clickablePlayers ? ` onclick="togglePlayers('${esc(s.name)}')"` : ""}><span>${esc(players)}</span></div>
+    <div class="datarow${clickablePlayers ? " clickable" : ""} mono"${clickablePlayers ? ` onclick="togglePlayers(${jsArg(s.name)})"` : ""}><span>${esc(players)}</span></div>
     <div class="mono">${versionCell}</div>
     <div class="mono">${esc(lastSeen)}</div>
     <div class="row-actions">${autoRebootToggle}</div>
@@ -585,7 +592,7 @@ function finalizeFormHtml(name, reg) {
     <div class="modal-error" id="fin-error"></div>
     <div class="modal-actions">
       <button onclick="closeModal(false)">annuler</button>
-      <button onclick="submitFinalize('${esc(name)}')">créer la tâche et activer</button>
+      <button onclick="submitFinalize(${jsArg(name)})">créer la tâche et activer</button>
     </div>`;
 }
 
@@ -635,7 +642,7 @@ function renderDiscoveredGames(games) {
     <div class="discovered-row">
       <span class="discovered-name">${esc(g.name || "(sans nom)")}</span>
       <span class="discovered-meta">appid ${esc(g.appid)} · build ${esc(g.buildid || "?")}</span>
-      <button onclick="openAdopt(${parseInt(g.appid, 10) || 0}, '${esc((g.name || "").toLowerCase().replace(/dedicated server/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32))}')">Adopter</button>
+      <button onclick="openAdopt(${parseInt(g.appid, 10) || 0}, ${jsArg((g.name || "").toLowerCase().replace(/dedicated server/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32))})">Adopter</button>
     </div>`).join("");
   return `<div class="discovered-section"><h4>Jeux détectés non gérés</h4>${rows}</div>`;
 }
@@ -857,12 +864,12 @@ function renderServerDetail(d, name) {
       const when = b.created ? new Date(b.created).toLocaleString("fr-FR") : "—";
       const size = b.size_mb != null ? ` · ${Number(b.size_mb).toFixed(0)} Mo` : "";
       const restoreBtn = isAdmin
-        ? ` <button class="save-btn save-restore" onclick="restoreSave('${esc(name)}', '${esc(b.file)}')">restaurer</button>`
+        ? ` <button class="save-btn save-restore" onclick="restoreSave(${jsArg(name)}, ${jsArg(b.file)})">restaurer</button>`
         : "";
       return `<div class="detail-row"><span>${esc(b.file)}</span><span>${esc(when)}${size}${restoreBtn}</span></div>`;
     }).join("");
     sections.push(`<div class="detail-section">
-      <div class="mods-head"><h4>Sauvegardes</h4><button class="save-btn" onclick="backupNow('${esc(name)}')">sauvegarder maintenant</button></div>
+      <div class="mods-head"><h4>Sauvegardes</h4><button class="save-btn" onclick="backupNow(${jsArg(name)})">sauvegarder maintenant</button></div>
       ${rows || `<div class="detail-empty">aucune sauvegarde</div>`}
     </div>`);
   }
@@ -945,7 +952,7 @@ function renderDetailConfig(s) {
     ? `<div class="detail-empty">chargement…</div>`
     : isEditing ? configFormHtml(name, reg) : configReadHtml(reg);
   const modifyBtn = (reg && !isEditing)
-    ? `<button class="save-btn" onclick="editServerConfig('${esc(name)}')">modifier</button>`
+    ? `<button class="save-btn" onclick="editServerConfig(${jsArg(name)})">modifier</button>`
     : "";
   return `<div class="detail-section" id="config-section-${esc(name)}">
     <div class="mods-head"><h4>Configuration — ${esc(s.display_name)}</h4><span id="config-modify-slot-${esc(name)}">${modifyBtn}</span></div>
@@ -997,8 +1004,8 @@ function configFormHtml(name, reg) {
     <label>dossier de sauvegarde <input type="text" id="cfg-save_dir-${n}" value="${esc(reg.save_dir || "")}"></label>
     <label>délai d'avertissement (s) <input type="number" id="cfg-stop_warn_seconds-${n}" value="${reg.stop_warn_seconds != null ? esc(reg.stop_warn_seconds) : ""}"></label>
     <div class="config-form-actions">
-      <button type="button" class="save-btn" onclick="saveServerConfig('${n}')">enregistrer</button>
-      <button type="button" class="save-btn" onclick="cancelServerConfig('${n}')">annuler</button>
+      <button type="button" class="save-btn" onclick="saveServerConfig(${jsArg(name)})">enregistrer</button>
+      <button type="button" class="save-btn" onclick="cancelServerConfig(${jsArg(name)})">annuler</button>
     </div>
   </form>`;
 }
@@ -1022,7 +1029,7 @@ function renderConfigBodyIfPresent(name) {
   const slot = document.getElementById(`config-modify-slot-${name}`);
   if (slot) {
     slot.innerHTML = !isEditing
-      ? `<button class="save-btn" onclick="editServerConfig('${esc(name)}')">modifier</button>`
+      ? `<button class="save-btn" onclick="editServerConfig(${jsArg(name)})">modifier</button>`
       : "";
   }
 }
@@ -1142,7 +1149,7 @@ function renderDetailChrome(s) {
 
 function renderAutoRebootToggle(s) {
   const on = !!s.auto_restart_on_crash;
-  return `<button class="aswitch${on ? " on" : ""}" onclick="toggleAutoRestartOnCrash('${esc(s.name)}', ${!on})"
+  return `<button class="aswitch${on ? " on" : ""}" onclick="toggleAutoRestartOnCrash(${jsArg(s.name)}, ${!on})"
       aria-pressed="${on}" title="redémarre automatiquement si le process disparaît de façon inattendue (max 3 tentatives / heure, sinon alerte et abandon)">
     <span class="aswitch-track"><span class="aswitch-knob"></span></span>
     <span class="aswitch-label">auto-reboot</span>
@@ -1184,7 +1191,7 @@ function renderDetailBepInExSection(s) {
       : `installé ${esc(m.installed_version || "—")}`;
     const errorLine = m.last_error ? `<span class="mod-dates">échec vérification : ${esc(m.last_error)}</span>` : "";
     const updateBtn = m.update_available
-      ? `<button class="mod-update-btn" onclick="updateBepInExMods('${esc(s.name)}', ['${esc(m.slug)}'])">mettre à jour</button>`
+      ? `<button class="mod-update-btn" onclick="updateBepInExMods(${jsArg(s.name)}, ${jsArg([m.slug])})">mettre à jour</button>`
       : "";
     return `
     <div class="mod-row">
@@ -1194,12 +1201,12 @@ function renderDetailBepInExSection(s) {
     </div>`;
   }).join("");
   const updateAllBtn = needsUpdate > 1
-    ? `<button class="mod-update-btn mod-update-all" onclick="updateBepInExMods('${esc(s.name)}', null)">tout mettre à jour (${needsUpdate})</button>`
+    ? `<button class="mod-update-btn mod-update-all" onclick="updateBepInExMods(${jsArg(s.name)}, null)">tout mettre à jour (${needsUpdate})</button>`
     : "";
   return `
     <div class="detail-section">
       <div class="mods-head"><h4>Mods BepInEx (${mods.length} suivis${needsUpdate ? ` · ${needsUpdate} maj dispo` : ""})</h4>
-        <button onclick="checkBepInExUpdates('${esc(s.name)}')">vérifier maintenant</button>${updateAllBtn}</div>
+        <button onclick="checkBepInExUpdates(${jsArg(s.name)})">vérifier maintenant</button>${updateAllBtn}</div>
       ${rows || `<div class="detail-empty">aucun mod suivi</div>`}
     </div>`;
 }
@@ -1271,7 +1278,7 @@ function renderDetailMods(s) {
     // Bouton aussi pour un mod installe sans installed_at (installe avant la feature) :
     // etat inconnu -> permettre la re-installation, qui pose la date de reference.
     const updateBtn = (m.update_available || (m.installed && !m.installed_at))
-      ? `<button class="mod-update-btn" onclick="updateMod('${esc(s.name)}', '${esc(m.workshop_id)}')">mettre à jour</button>`
+      ? `<button class="mod-update-btn" onclick="updateMod(${jsArg(s.name)}, ${jsArg(m.workshop_id)})">mettre à jour</button>`
       : "";
     return `
     <div class="mod-row">
@@ -1279,12 +1286,12 @@ function renderDetailMods(s) {
       <span class="mod-title">${esc(m.title)}<span class="mod-dates">${esc(dates.join(" · ") || "—")}</span></span>
       <span class="mod-status ${st.cls}">${st.label}</span>
       ${updateBtn}
-      <button onclick="removeMod('${esc(s.name)}', '${esc(m.workshop_id)}')">retirer</button>
+      <button onclick="removeMod(${jsArg(s.name)}, ${jsArg(m.workshop_id)})">retirer</button>
     </div>`;
   }).join("");
   const anyToUpdate = mods.some(m => m.update_available || (m.installed && !m.installed_at));
   const updateAllBtn = anyToUpdate
-    ? `<button class="mod-update-btn mod-update-all" onclick="updateAllMods('${esc(s.name)}')">tout mettre à jour</button>`
+    ? `<button class="mod-update-btn mod-update-all" onclick="updateAllMods(${jsArg(s.name)})">tout mettre à jour</button>`
     : "";
   const installedCount = mods.filter(m => m.installed).length;
   const needsUpdate = mods.filter(m => m.update_available).length;
@@ -1295,9 +1302,9 @@ function renderDetailMods(s) {
       ${modRows || `<div class="detail-empty">aucun mod</div>`}
       <div class="mod-add-row">
         <input type="text" id="mod-input-${esc(s.name)}" placeholder="lien ou ID Workshop">
-        <button onclick="addMod('${esc(s.name)}')">ajouter</button>
+        <button onclick="addMod(${jsArg(s.name)})">ajouter</button>
       </div>
-      <span class="workshop-toggle" onclick="toggleWorkshopBrowser('${esc(s.name)}')">parcourir le Workshop</span>
+      <span class="workshop-toggle" onclick="toggleWorkshopBrowser(${jsArg(s.name)})">parcourir le Workshop</span>
       <div class="workshop-browser" id="workshop-browser-${esc(s.name)}"></div>
     </div>
     ${renderDetailBepInExSection(s)}`;
@@ -1330,12 +1337,12 @@ function fileTreeHtml(name, listing) {
   const roots = Object.keys(listing || {});
   if (roots.length === 0) {
     return `<p class="files-empty">Aucun listing pour l'instant.
-      <button onclick="listFiles('${esc(name)}', 'install')">lister le dossier d'install</button></p>`;
+      <button onclick="listFiles(${jsArg(name)}, 'install')">lister le dossier d'install</button></p>`;
   }
   return roots.map(root => `
     <div class="files-root">
       <strong>${esc(root)}</strong>
-      <button onclick="listFiles('${esc(name)}', '${esc(root)}')">rafraichir</button>
+      <button onclick="listFiles(${jsArg(name)}, ${jsArg(root)})">rafraichir</button>
       <ul>${(listing[root] || []).map(p => `
         <li><a href="#" class="file-open-link" data-server-name="${esc(name)}" data-root="${esc(root)}" data-path="${esc(p)}">${esc(p)}</a></li>`).join("")}
       </ul>
@@ -1351,9 +1358,9 @@ function fileEditorHtml(name, fileRead) {
       <p>Edition de <code>${esc(openFileEditor.root)}/${esc(openFileEditor.path)}</code></p>
       <textarea id="file-editor-textarea" rows="16">${esc(content)}</textarea>
       <div class="file-editor-actions">
-        <button onclick="previewFileDiff('${esc(name)}')">Aperçu</button>
-        <button onclick="saveFile('${esc(name)}', false)">Enregistrer</button>
-        <button onclick="saveFile('${esc(name)}', true)">Enregistrer et redémarrer</button>
+        <button onclick="previewFileDiff(${jsArg(name)})">Aperçu</button>
+        <button onclick="saveFile(${jsArg(name)}, false)">Enregistrer</button>
+        <button onclick="saveFile(${jsArg(name)}, true)">Enregistrer et redémarrer</button>
       </div>
       <div id="file-diff-preview"></div>
     </div>`;
@@ -1734,7 +1741,7 @@ function renderWorkshopResultsGrid(name, results) {
     return;
   }
   grid.innerHTML = results.map(r => `
-    <div class="workshop-thumb" data-wid="${esc(r.workshop_id)}" onclick="selectWorkshopResult('${esc(name)}', '${esc(r.workshop_id)}')">
+    <div class="workshop-thumb" data-wid="${esc(r.workshop_id)}" onclick="selectWorkshopResult(${jsArg(name)}, ${jsArg(r.workshop_id)})">
       ${r.thumbnail_url ? `<img src="${esc(r.thumbnail_url)}" alt="">` : ""}
       <div class="wt-info">
         <div class="wt-name">${esc(r.title)}</div>
@@ -1790,7 +1797,7 @@ function selectWorkshopResult(name, workshopId) {
     <h4>${esc(result.title)}</h4>
     <div class="wd-subs">${esc(result.subscriptions)} abonnes</div>
     <p>${esc(result.description)}</p>
-    <button onclick="installWorkshopResult('${esc(name)}', '${esc(workshopId)}')">Installer</button>
+    <button onclick="installWorkshopResult(${jsArg(name)}, ${jsArg(workshopId)})">Installer</button>
   `;
 }
 
@@ -1863,21 +1870,32 @@ function restoreOpenPanels() {
   }
 }
 
+// Garde anti-chevauchement : chaque appel prend un numero ; une reponse (ou un echec) n'est
+// appliquee que si aucune reponse plus recente n'a deja ete appliquee. Pas de drapeau
+// "en vol" : un echec reseau ne peut donc jamais laisser le garde bloque.
+let fetchServersSeq = 0;
+let fetchServersApplied = 0;
+
 async function fetchServers() {
+  const seq = ++fetchServersSeq;
+  const isStale = () => seq < fetchServersApplied;
   try {
     const res = await apiCall("/api/servers");
+    if (isStale()) return;
     if (!res.ok) {
       showError(`Erreur serveur (${res.status}).`);
       return;
     }
-    showError("");
     const data = await res.json();
+    if (isStale()) return;
+    fetchServersApplied = seq;
+    showError("");
     latestServers = data.servers;
     discoveredGames = data.discovered_games || [];
     agentVersion = data.agent_version || null;
     renderGrid();
   } catch (e) {
-    showError(String(e.message || e));
+    if (!isStale()) showError(String(e.message || e));
   }
 }
 
@@ -1962,21 +1980,21 @@ function renderAccountsList() {
           <option value="admin" ${u.role === "admin" ? "selected" : ""}>administrateur</option>
         </select>
         ${serverCheckboxesHtml("edit", u.servers)}
-        <button onclick="saveAccountAccess('${esc(u.username)}')">enregistrer</button>
+        <button onclick="saveAccountAccess(${jsArg(u.username)})">enregistrer</button>
       </div>` : "";
     const pwEditor = accountPasswordFor === u.username ? `
       <div class="account-editor">
         <input type="text" id="pw-input-${esc(u.username)}" placeholder="nouveau mot de passe (12 caractères min)" maxlength="128" autocomplete="off">
-        <button onclick="saveAccountPassword('${esc(u.username)}')">enregistrer</button>
+        <button onclick="saveAccountPassword(${jsArg(u.username)})">enregistrer</button>
       </div>` : "";
     return `
     <div class="account-row">
       <span class="acc-name">${esc(u.username)}</span>
       <span class="account-role ${esc(u.role)}">${u.role === "admin" ? "admin" : "limité"}</span>
       <span class="account-servers-label">${esc(servers)}</span>
-      <button onclick="toggleAccountEditor('${esc(u.username)}')">accès</button>
-      <button onclick="togglePasswordEditor('${esc(u.username)}')">mdp</button>
-      ${isSelf ? "" : `<button class="acc-delete" onclick="deleteAccount('${esc(u.username)}')">supprimer</button>`}
+      <button onclick="toggleAccountEditor(${jsArg(u.username)})">accès</button>
+      <button onclick="togglePasswordEditor(${jsArg(u.username)})">mdp</button>
+      ${isSelf ? "" : `<button class="acc-delete" onclick="deleteAccount(${jsArg(u.username)})">supprimer</button>`}
       ${editor}
       ${pwEditor}
     </div>`;

@@ -69,3 +69,14 @@ def test_app_js_renders_without_reference_errors():
     result = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert "SMOKE OK" in result.stdout
+
+
+def test_inline_handlers_are_json_escaped_and_fetch_servers_is_guarded():
+    """F1/F2 : handlers inline via jsArg() (payloads hostiles rejoues comme un navigateur)
+    + garde anti-chevauchement de fetchServers. Voir tests/js/inline-handlers.js."""
+    import pathlib
+    import subprocess
+    script = pathlib.Path(__file__).parent / "js" / "inline-handlers.js"
+    result = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "INLINE HANDLERS OK" in result.stdout
