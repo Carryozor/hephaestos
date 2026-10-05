@@ -20,6 +20,12 @@ BeforeAll {
 }
 '@ | Set-Content -LiteralPath (Join-Path $script:agentTestManifestDir "appmanifest_2394010.acf") -Encoding UTF8
 
+    # Le journal d'idempotence (P2) est derive de ConfigPath, dont le defaut pointe le dossier
+    # du script : on le redirige vers un fichier jetable (un nouveau a chaque cycle) pour
+    # qu'aucun test n'ecrive dans agent/ ni ne voie les ordres journalises par un autre
+    # (memes ids "o1", "o2"... reutilises d'un test a l'autre).
+    Mock Get-HephJournalPath { Join-Path $TestDrive "journal-$([guid]::NewGuid().ToString('N')).json" }
+
     function New-TestCfg {
     param([string]$KumaMajPush = $null)
 
@@ -454,7 +460,7 @@ Describe "Invoke-HephAgentCycle -- rapport d'etat enrichi et config backend (v2.
         Invoke-HephAgentCycle -Cfg $script:cfgCycle -ConfigPath $script:configPathCycle -Now (Get-Date "2026-07-18 12:00") -LogPath (Join-Path $TestDrive "cycle-enrichi.log")
 
         $stateCall = $script:apiCallsCycle | Where-Object { $_.Path -eq "/api/agent/state" } | Select-Object -First 1
-        $stateCall.Body.agent_version | Should -Be "2.3.0"
+        $stateCall.Body.agent_version | Should -Be "2.4.0"
         @($stateCall.Body.config_servers).Count | Should -Be 1
         $stateCall.Body.config_servers[0].name | Should -Be "palworld"
     }
@@ -737,7 +743,10 @@ Describe "Invoke-HephAgentCycle -- rcon_info via log console (repli Valheim)" {
         $stateCall = $script:apiCallsValheim | Where-Object { $_.Path -eq "/api/agent/state" }
         $srv = $stateCall.Body.servers.valheim
         $srv.players | Should -Be 0
-        $srv.players_list | Should -BeNullOrEmpty
+        # Tableau VIDE explicite : -BeNullOrEmpty passerait aussi avec $null (le backend
+        # interpreterait alors "inconnu" et garderait la liste perimee).
+        ($srv.players_list -is [array]) | Should -BeTrue
+        $srv.players_list.Count | Should -Be 0
     }
 
     It "exception levee par Get-ValheimLogInfo : capturee, le cycle continue (etat + kuma s'executent quand meme)" {
@@ -1082,5 +1091,99 @@ Describe "Invoke-HephAgentCycle -- long-poll (activation reactive)" {
         @($script:calls | Where-Object { $_.Path -like "*wait=*" }).Count | Should -BeGreaterThan 0
         Should -Invoke Restart-GameServer -Times 1
         @($script:calls | Where-Object { $_.Path -eq "/api/agent/orders/lp1" -and $_.Body.status -eq "done" }).Count | Should -Be 1
+    }
+}
+
+
+Describe "Invoke-HephAgentCycle -- players_list vide explicite (P8)" {
+    BeforeEach {
+        function Get-PalworldStateEntry {
+            $stateCall = $script:apiCalls | Where-Object { $_.Path -eq "/api/agent/state" }
+            return $stateCall.Body.servers.palworld
+        }
+        $script:cfg = New-TestCfg
+        $script:apiCalls = @()
+        Mock Get-LocalBuildId { "100" }
+        Mock Get-PublicBuildId { "100" }
+        Mock Send-KumaPush {}
+        Mock Invoke-HephApi {
+            $script:apiCalls += [pscustomobject]@{ Method = $Method; Path = $Path; Body = $Body }
+            if ($Path -like "/api/agent/orders*") { return [pscustomobject]@{ orders = @() } }
+            return [pscustomobject]@{ ok = $true }
+        }
+    }
+
+    It "Palworld, comptage connu = 0 : players_list est un tableau vide (pas `$null)" {
+        Mock Get-Process { [pscustomobject]@{ Id = 1; StartTime = (Get-Date "2026-10-05 10:00") } }
+        Mock Get-PalworldPlayers { [pscustomobject]@{ Count = 0; Players = @() } }
+
+        Invoke-HephAgentCycle -Cfg $script:cfg -Now (Get-Date "2026-10-05 12:00") -LogPath (Join-Path $TestDrive "p8.log") -JournalPath (Join-Path $TestDrive "p8a.json")
+
+        $entry = Get-PalworldStateEntry
+        $entry.players | Should -Be 0
+        ($entry.players_list -is [array]) | Should -BeTrue
+        $entry.players_list.Count | Should -Be 0
+    }
+
+    It "Palworld, process ARRETE (RCON injoignable) : players_list = tableau vide, players reste inconnu" {
+        Mock Get-Process { $null }
+        Mock Get-PalworldPlayers { throw "connexion refusee" }
+
+        Invoke-HephAgentCycle -Cfg $script:cfg -Now (Get-Date "2026-10-05 12:00") -LogPath (Join-Path $TestDrive "p8.log") -JournalPath (Join-Path $TestDrive "p8b.json")
+
+        $entry = Get-PalworldStateEntry
+        $entry.process_up | Should -BeFalse
+        ($entry.players_list -is [array]) | Should -BeTrue
+        $entry.players_list.Count | Should -Be 0
+        $entry.players | Should -BeNullOrEmpty
+    }
+
+    It "Palworld, process UP mais comptage inconnu (RCON en echec) : players_list reste `$null (ne pas effacer la liste a tort)" {
+        Mock Get-Process { [pscustomobject]@{ Id = 1; StartTime = (Get-Date "2026-10-05 10:00") } }
+        Mock Get-PalworldPlayers { throw "timeout RCON" }
+
+        Invoke-HephAgentCycle -Cfg $script:cfg -Now (Get-Date "2026-10-05 12:00") -LogPath (Join-Path $TestDrive "p8.log") -JournalPath (Join-Path $TestDrive "p8c.json")
+
+        $entry = Get-PalworldStateEntry
+        $entry.players_list | Should -BeNullOrEmpty
+        ($null -eq $entry.players_list) | Should -BeTrue
+    }
+
+    It "Valheim, process arrete : players_list = tableau vide" {
+        $server = [pscustomobject]@{
+            name = "valheim"; appid = 2394010; process = "valheim_server"; start_task = "valheim"
+            stop_adapter = "generic-graceful"; console_log_path = "C:\steam\valheim-console.log"
+        }
+        $script:cfg.servers = @($server)
+        Mock Get-Process { $null }
+        Mock Get-ValheimLogInfo { throw "ne doit pas etre appele process arrete" }
+
+        Invoke-HephAgentCycle -Cfg $script:cfg -Now (Get-Date "2026-10-05 12:00") -LogPath (Join-Path $TestDrive "p8.log") -JournalPath (Join-Path $TestDrive "p8d.json")
+
+        $stateCall = $script:apiCalls | Where-Object { $_.Path -eq "/api/agent/state" }
+        $entry = $stateCall.Body.servers.valheim
+        ($entry.players_list -is [array]) | Should -BeTrue
+        $entry.players_list.Count | Should -Be 0
+    }
+
+    It "A2S (compte seul), comptage connu = 0 : players_list = tableau vide ; comptage inconnu : `$null" {
+        $server = [pscustomobject]@{
+            name = "src"; appid = 2394010; process = "src_server"; start_task = "src"
+            stop_adapter = "generic-graceful"; query_port = 27015
+        }
+        $script:cfg.servers = @($server)
+        Mock Get-Process { [pscustomobject]@{ Id = 1; StartTime = (Get-Date "2026-10-05 10:00") } }
+        Mock Get-A2sPlayerCount { 0 }
+
+        Invoke-HephAgentCycle -Cfg $script:cfg -Now (Get-Date "2026-10-05 12:00") -LogPath (Join-Path $TestDrive "p8.log") -JournalPath (Join-Path $TestDrive "p8e.json")
+        $entry = ($script:apiCalls | Where-Object { $_.Path -eq "/api/agent/state" }).Body.servers.src
+        ($entry.players_list -is [array]) | Should -BeTrue
+        $entry.players_list.Count | Should -Be 0
+
+        $script:apiCalls = @()
+        Mock Get-A2sPlayerCount { $null }
+        Invoke-HephAgentCycle -Cfg $script:cfg -Now (Get-Date "2026-10-05 12:00") -LogPath (Join-Path $TestDrive "p8.log") -JournalPath (Join-Path $TestDrive "p8f.json")
+        $entry = ($script:apiCalls | Where-Object { $_.Path -eq "/api/agent/state" }).Body.servers.src
+        ($null -eq $entry.players_list) | Should -BeTrue
     }
 }

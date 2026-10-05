@@ -14,7 +14,7 @@ param(
 
 # Version rapportee dans le POST /api/agent/state (agent_version) -- a incrementer a
 # chaque changement de contrat/comportement observable par le backend.
-$script:HephAgentVersion = "2.3.0"
+$script:HephAgentVersion = "2.4.0"
 
 function Write-HephLog {
     <#
@@ -86,9 +86,20 @@ function Test-InAutoUpdateWindow {
 function Set-HephOrderStatus {
     <#
     .SYNOPSIS
-        POST /api/agent/orders/{id} avec status+detail. Renvoie $false si l'ordre est deja
-        dans un etat terminal (409 -- deja gere ailleurs, l'appelant ne doit pas executer
-        l'action), $true dans tous les autres cas (succes ou erreur transitoire loggee).
+        POST /api/agent/orders/{id} avec status+detail, retry borne sur erreur transitoire.
+        Renvoie $true si le backend a accepte le statut, $false sinon : soit l'ordre est
+        deja dans un etat terminal (409 -- deja gere ailleurs, l'appelant ne doit pas
+        executer l'action), soit le report a echoue definitivement (erreur loggee).
+    .NOTES
+        Le 409 est detecte par le CODE HTTP de l'exception (Get-HephHttpStatusCode), JAMAIS
+        par un match "409" sur le message : un uuid d'ordre contenant "409" le declencherait
+        a tort. Sont retentees (RetryDelaysMs.Count + 1 tentatives, 3 par defaut, backoff
+        court injectable pour les tests) les erreurs sans reponse HTTP (reseau), 5xx, 408
+        et 429 ; les autres 4xx sont definitives (retenter ne changerait rien).
+
+        Avant v2.4.0 un echec de report renvoyait $true (l'appelant executait l'action sans
+        que le backend le sache). Un report FINAL echoue est desormais consigne par
+        l'appelant dans le journal d'idempotence pour etre re-tente sans re-execution.
     #>
     param(
         [Parameter(Mandatory)]
@@ -104,7 +115,9 @@ function Set-HephOrderStatus {
 
         $Extra = $null,
 
-        [string]$LogPath
+        [string]$LogPath,
+
+        [int[]]$RetryDelaysMs = @(500, 2000)
     )
 
     $body = @{ status = $Status; detail = $Detail }
@@ -112,17 +125,363 @@ function Set-HephOrderStatus {
         foreach ($key in $Extra.Keys) { $body[$key] = $Extra[$key] }
     }
 
+    $maxAttempts = @($RetryDelaysMs).Count + 1
+    $lastMessage = ""
+    $attemptsDone = 0
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $attemptsDone = $attempt
+        try {
+            Invoke-HephApi -Cfg $Cfg -Method Post -Path "/api/agent/orders/${OrderId}" -Body $body | Out-Null
+            return $true
+        } catch {
+            $httpStatus = Get-HephHttpStatusCode -ErrorRecord $_
+            if ($httpStatus -eq 409) {
+                Write-HephLog -LogPath $LogPath -Message "ordre ${OrderId}: deja en etat terminal (409), ignore"
+                return $false
+            }
+            $lastMessage = $_.Exception.Message
+            $isTransient = ($null -eq $httpStatus) -or ($httpStatus -ge 500) -or ($httpStatus -eq 408) -or ($httpStatus -eq 429)
+            if (-not $isTransient) { break }
+            if ($attempt -lt $maxAttempts) {
+                Start-Sleep -Milliseconds $RetryDelaysMs[$attempt - 1]
+            }
+        }
+    }
+    Write-HephLog -LogPath $LogPath -Message "ordre ${OrderId}: ERREUR report statut ${Status} apres ${attemptsDone} tentative(s): ${lastMessage}"
+    return $false
+}
+
+# --- Journal d'idempotence des ordres (P2) -----------------------------------------------
+# Un ordre "running" cote backend est re-servi a chaque cycle (jusqu'a 24 h) : sans memoire
+# locale, un agent tue en plein update/restore rejouerait l'action destructive, et un report
+# final perdu (backend injoignable) re-executerait un ordre pourtant termine. Le journal
+# (orders-journal.json a cote de la config) consigne {id,type,state,at,detail} :
+#   started -> done|failed. Ecriture atomique (tmp + Move-Item), purge a 48 h, tout echec
+# d'I/O est NON FATAL (journal absent/vide/corrompu = repart a vide, jamais d'exception).
+$script:HephJournalMaxAgeHours = 48
+$script:HephInterruptedWindowMinutes = 15
+$script:HephDestructiveOrderTypes = @("restore_save", "update", "restart", "stop")
+# Ordres de lecture seule : rejouables sans danger, et leur resultat (contenu de fichiers de
+# config) ne doit pas etre copie sur disque dans le journal.
+$script:HephUnjournaledOrderTypes = @("list_files", "read_file")
+
+function Get-HephJournalPath {
+    <#
+    .SYNOPSIS
+        Chemin du journal : orders-journal.json dans le dossier du fichier de config.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
+    )
+
+    $dir = Split-Path -Path $ConfigPath -Parent
+    if (-not $dir) { $dir = "." }
+    return (Join-Path $dir "orders-journal.json")
+}
+
+function ConvertTo-HephJournalEntry {
+    <#
+    .SYNOPSIS
+        Entree brute (PSCustomObject issu de ConvertFrom-Json, PS 5.1 compatible) -> table
+        normalisee, ou $null si l'entree est inexploitable.
+    #>
+    param($Raw)
+
+    if ($null -eq $Raw) { return $null }
+    $names = @($Raw.PSObject.Properties.Name)
+    if (($names -notcontains "id") -or ($names -notcontains "state") -or ($names -notcontains "at")) { return $null }
+    if (-not $Raw.id) { return $null }
+    $state = [string]$Raw.state
+    if (@("started", "done", "failed") -notcontains $state) { return $null }
+
+    # PS 7 convertit seul les chaines ISO 8601 en [datetime] ; PS 5.1 les laisse en chaine.
+    $at = $null
+    if ($Raw.at -is [datetime]) {
+        $at = $Raw.at.ToUniversalTime()
+    } else {
+        try {
+            $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+            $at = [datetime]::Parse([string]$Raw.at, [System.Globalization.CultureInfo]::InvariantCulture, $styles)
+        } catch {
+            return $null
+        }
+    }
+
+    $extra = $null
+    if ($names -contains "extra" -and $null -ne $Raw.extra) {
+        $extra = @{}
+        foreach ($prop in $Raw.extra.PSObject.Properties) { $extra[$prop.Name] = $prop.Value }
+    }
+    $detail = $null
+    if ($names -contains "detail" -and $null -ne $Raw.detail) { $detail = [string]$Raw.detail }
+    $reported = $false
+    if ($names -contains "reported" -and $null -ne $Raw.reported) { $reported = [bool]$Raw.reported }
+
+    return @{
+        id       = [string]$Raw.id
+        type     = $(if ($names -contains "type") { [string]$Raw.type } else { "" })
+        state    = $state
+        at       = $at
+        detail   = $detail
+        extra    = $extra
+        reported = $reported
+    }
+}
+
+function Read-HephJournal {
+    <#
+    .SYNOPSIS
+        Lit le journal : table id -> entree. Absent, vide, corrompu ou de forme inattendue :
+        table vide, sans exception.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $journal = @{}
+    if (-not (Test-Path -LiteralPath $Path)) { return $journal }
+    $doc = $null
     try {
-        Invoke-HephApi -Cfg $Cfg -Method Post -Path "/api/agent/orders/${OrderId}" -Body $body | Out-Null
+        $text = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($text)) { return $journal }
+        $doc = $text | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return $journal
+    }
+    if ($null -eq $doc -or -not (@($doc.PSObject.Properties.Name) -contains "entries")) { return $journal }
+
+    foreach ($raw in @($doc.entries)) {
+        $entry = ConvertTo-HephJournalEntry -Raw $raw
+        if ($entry) { $journal[$entry.id] = $entry }
+    }
+    return $journal
+}
+
+function Write-HephJournal {
+    <#
+    .SYNOPSIS
+        Ecrit le journal de facon atomique (fichier .tmp puis Move-Item) apres purge des
+        entrees de plus de 48 h. Ne leve jamais : retourne $false en cas d'echec d'I/O
+        (consigne dans -LogPath si fourni : un Write-Warning seul est invisible pour une
+        tache planifiee).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [hashtable]$Journal,
+
+        [datetime]$NowUtc = (Get-Date).ToUniversalTime(),
+
+        [string]$LogPath = $null
+    )
+
+    $tmpPath = "${Path}.tmp"
+    try {
+        $cutoff = $NowUtc.AddHours(-$script:HephJournalMaxAgeHours)
+        $items = @()
+        foreach ($id in @($Journal.Keys)) {
+            $entry = $Journal[$id]
+            if ($entry.at -lt $cutoff) { continue }
+            $record = [ordered]@{
+                id       = $entry.id
+                type     = $entry.type
+                state    = $entry.state
+                at       = $entry.at.ToUniversalTime().ToString("o")
+                detail   = $entry.detail
+                reported = [bool]$entry.reported
+            }
+            if ($null -ne $entry.extra) { $record["extra"] = $entry.extra }
+            $items += $record
+        }
+        $json = @{ entries = @($items) } | ConvertTo-Json -Depth 8
+
+        $dir = Split-Path -Path $Path -Parent
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        Set-Content -LiteralPath $tmpPath -Value $json -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $tmpPath -Destination $Path -Force -ErrorAction Stop
         return $true
     } catch {
-        if ($_.Exception.Message -match "409") {
-            Write-HephLog -LogPath $LogPath -Message "ordre ${OrderId}: deja en etat terminal (409), ignore"
-            return $false
+        $message = "Write-HephJournal: ecriture du journal impossible (${Path}): $($_.Exception.Message)"
+        Write-Warning $message
+        if ($LogPath) {
+            try { Write-HephLog -LogPath $LogPath -Message $message } catch { }
         }
-        Write-HephLog -LogPath $LogPath -Message "ordre ${OrderId}: ERREUR report statut ${Status}: $($_.Exception.Message)"
-        return $true
+        Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+        return $false
     }
+}
+
+function Set-HephJournalEntry {
+    <#
+    .SYNOPSIS
+        Cree/met a jour l'entree d'un ordre (lecture-modification-ecriture du fichier).
+        'at' = instant du demarrage : fixe a l'etat started, conserve aux etats finaux.
+        Retourne $true si le journal a ete ecrit, $false sinon (echec consigne dans -LogPath).
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$Id,
+        [Parameter(Mandatory)] [string]$Type,
+        [Parameter(Mandatory)] [ValidateSet("started", "done", "failed")] [string]$State,
+        $Detail = $null,
+        $Extra = $null,
+        [datetime]$NowUtc = (Get-Date).ToUniversalTime(),
+        [string]$LogPath = $null
+    )
+
+    $journal = Read-HephJournal -Path $Path
+    $at = $NowUtc
+    if ($State -ne "started" -and $journal.ContainsKey($Id)) { $at = $journal[$Id].at }
+    $detailText = $null
+    if ($null -ne $Detail) { $detailText = [string]$Detail }
+    $journal[$Id] = @{
+        id       = $Id
+        type     = $Type
+        state    = $State
+        at       = $at
+        detail   = $detailText
+        extra    = $Extra
+        reported = $false
+    }
+    return (Write-HephJournal -Path $Path -Journal $journal -NowUtc $NowUtc -LogPath $LogPath)
+}
+
+function Set-HephJournalReported {
+    <#
+    .SYNOPSIS
+        Marque l'entree comme "statut final accepte par le backend".
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$Id,
+        [string]$LogPath = $null
+    )
+
+    $journal = Read-HephJournal -Path $Path
+    if (-not $journal.ContainsKey($Id)) { return }
+    $journal[$Id].reported = $true
+    Write-HephJournal -Path $Path -Journal $journal -LogPath $LogPath | Out-Null
+}
+
+function Remove-HephJournalEntry {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$Id
+    )
+
+    $journal = Read-HephJournal -Path $Path
+    if (-not $journal.ContainsKey($Id)) { return }
+    $journal.Remove($Id)
+    Write-HephJournal -Path $Path -Journal $journal | Out-Null
+}
+
+function Enter-HephOrder {
+    <#
+    .SYNOPSIS
+        Decide si un ordre doit etre EXECUTE (retourne $true) apres consultation du journal,
+        et passe l'ordre en "running" cote backend.
+    .NOTES
+        - id deja termine (done/failed) dans le journal : pas de re-execution, le statut
+          final stocke est re-reporte (rattrape un report final perdu).
+        - id "started" sans fin, type destructif, demarre il y a moins de 15 min : l'agent a
+          ete interrompu en plein ordre ; on ne le rejoue PAS, on le reporte failed
+          ("interrompu, non rejoue") -- sinon il resterait running jusqu'a 24 h.
+        - sinon : entree "started" ecrite AVANT l'execution, puis POST running. Si ce POST
+          est refuse (409) ou echoue, l'entree est retiree (rien n'a ete execute).
+        Retourne $false = ordre deja traite ici, l'appelant ne doit rien executer.
+    #>
+    param(
+        [Parameter(Mandatory)] $Cfg,
+        [Parameter(Mandatory)] $Order,
+        [Parameter(Mandatory)] [string]$JournalPath,
+        [Parameter(Mandatory)] [string]$LogPath
+    )
+
+    $orderId = [string]$Order.id
+    $orderType = [string]$Order.type
+    $journaled = ($script:HephUnjournaledOrderTypes -notcontains $orderType)
+
+    if ($journaled) {
+        $journal = Read-HephJournal -Path $JournalPath
+        if ($journal.ContainsKey($orderId)) {
+            $entry = $journal[$orderId]
+            if ($entry.state -eq "done" -or $entry.state -eq "failed") {
+                Write-HephLog -LogPath $LogPath -Message "ordre ${orderId} [${orderType}]: deja $($entry.state) dans le journal, non rejoue, statut final re-reporte"
+                $reported = Set-HephOrderStatus -Cfg $Cfg -OrderId $orderId -Status $entry.state -Detail $entry.detail -Extra $entry.extra -LogPath $LogPath
+                if ($reported) { Set-HephJournalReported -Path $JournalPath -Id $orderId }
+                return $false
+            }
+            $ageMinutes = ((Get-Date).ToUniversalTime() - $entry.at).TotalMinutes
+            if ($entry.state -eq "started" -and ($script:HephDestructiveOrderTypes -contains $orderType) -and
+                $ageMinutes -lt $script:HephInterruptedWindowMinutes) {
+                $detail = "interrompu, non rejoue (ordre ${orderType} demarre a $($entry.at.ToString('u')) sans fin enregistree : agent interrompu en cours d'execution)"
+                Write-HephLog -LogPath $LogPath -Message "ordre ${orderId} [${orderType}]: ${detail}"
+                Set-HephJournalEntry -Path $JournalPath -Id $orderId -Type $orderType -State "failed" -Detail $detail -LogPath $LogPath | Out-Null
+                $reported = Set-HephOrderStatus -Cfg $Cfg -OrderId $orderId -Status "failed" -Detail $detail -LogPath $LogPath
+                if ($reported) { Set-HephJournalReported -Path $JournalPath -Id $orderId }
+                return $false
+            }
+        }
+        $startedWritten = Set-HephJournalEntry -Path $JournalPath -Id $orderId -Type $orderType -State "started" -LogPath $LogPath
+        if (-not $startedWritten) {
+            # Sans entree "started", un crash en plein ordre le ferait rejouer : pour un ordre
+            # destructif on refuse de l'executer ; sinon on poursuit (rejouable sans danger).
+            if ($script:HephDestructiveOrderTypes -contains $orderType) {
+                $detail = "journal d'idempotence indisponible, ordre destructif non execute"
+                Write-HephLog -LogPath $LogPath -Message "ordre ${orderId} [${orderType}]: ${detail}"
+                Set-HephOrderStatus -Cfg $Cfg -OrderId $orderId -Status "failed" -Detail $detail -LogPath $LogPath | Out-Null
+                return $false
+            }
+            Write-HephLog -LogPath $LogPath -Message "ordre ${orderId} [${orderType}]: journal d'idempotence indisponible, ordre non destructif execute quand meme"
+        }
+    }
+
+    $proceed = Set-HephOrderStatus -Cfg $Cfg -OrderId $orderId -Status "running" -LogPath $LogPath
+    if (-not $proceed -and $journaled) {
+        Remove-HephJournalEntry -Path $JournalPath -Id $orderId
+    }
+    return $proceed
+}
+
+function Complete-HephOrder {
+    <#
+    .SYNOPSIS
+        Consigne le resultat final dans le journal AVANT de le reporter au backend, puis
+        marque l'entree "reported" si le backend l'a accepte. Un report echoue laisse donc une
+        entree done/failed non reportee : au cycle suivant l'ordre (toujours running cote
+        backend) est re-reporte par Enter-HephOrder, sans re-execution. Retourne le statut.
+    #>
+    param(
+        [Parameter(Mandatory)] $Cfg,
+        [Parameter(Mandatory)] $Order,
+        [Parameter(Mandatory)] $Result,
+        $Extra = $null,
+        [Parameter(Mandatory)] [string]$JournalPath,
+        [Parameter(Mandatory)] [string]$LogPath
+    )
+
+    $orderId = [string]$Order.id
+    $orderType = [string]$Order.type
+    $finalStatus = if ($Result.ok) { "done" } else { "failed" }
+    $journaled = ($script:HephUnjournaledOrderTypes -notcontains $orderType)
+
+    if ($journaled) {
+        Set-HephJournalEntry -Path $JournalPath -Id $orderId -Type $orderType -State $finalStatus -Detail $Result.detail -Extra $Extra -LogPath $LogPath | Out-Null
+    }
+    $reported = Set-HephOrderStatus -Cfg $Cfg -OrderId $orderId -Status $finalStatus -Detail $Result.detail -Extra $Extra -LogPath $LogPath
+    if ($reported -and $journaled) {
+        Set-HephJournalReported -Path $JournalPath -Id $orderId
+    }
+    if (-not $reported) {
+        Write-HephLog -LogPath $LogPath -Message "ordre ${orderId}: statut final ${finalStatus} non accepte par le backend, sera re-reporte au prochain cycle (sans re-execution)"
+    }
+    return $finalStatus
 }
 
 function Send-HephStateReport {
@@ -242,6 +601,14 @@ function Send-HephStateReport {
                     }
                 }
             }
+            # Liste VIDE explicite (et non $null) quand on SAIT qu'il n'y a personne : comptage
+            # connu a 0, ou process arrete. Le backend lit $null comme "inconnu" et garderait
+            # une liste perimee affichee.
+            if ($null -eq $playersList) {
+                if (-not $processUp -or ($null -ne $players -and $players -eq 0)) {
+                    $playersList = @()
+                }
+            }
             $playerCounts[$serverCfg.name] = $players
 
             $saveBackups = $null
@@ -348,10 +715,21 @@ function Invoke-HephAgentCycle {
         # Duree d'attente serveur par requete long-poll (l'agent enchaine plusieurs
         # requetes courtes dans la fenetre : plus robuste aux coupures qu'une seule
         # longue). Le backend borne cette valeur de son cote.
-        [int]$LongPollWaitSeconds = 30
+        [int]$LongPollWaitSeconds = 30,
+
+        # Journal d'idempotence des ordres (P2). Defaut : orders-journal.json a cote de
+        # ConfigPath.
+        [string]$JournalPath = $null
     )
 
     Write-HephLog -LogPath $LogPath -Message "=== cycle demarre ==="
+
+    $journalPath = $JournalPath
+    if (-not $journalPath) { $journalPath = Get-HephJournalPath -ConfigPath $ConfigPath }
+    # Verrou transmis aux fonctions qui l'acceptent (Stop-GameServer rafraichit le verrou
+    # pendant son decompte) ; vide si le cycle tourne sans verrou (tests, appel direct).
+    $lockArgs = @{}
+    if ($LockPath) { $lockArgs.LockPath = $LockPath }
 
     $state = Send-HephStateReport -Cfg $Cfg -LogPath $LogPath
     $localBuildIds = $state.LocalBuildIds
@@ -471,7 +849,7 @@ function Invoke-HephAgentCycle {
         $deployTypes = @("install_game", "scan_exe", "setup_server")
         if ($order.type -in $deployTypes) {
             try {
-                $proceed = Set-HephOrderStatus -Cfg $Cfg -OrderId $order.id -Status "running" -LogPath $LogPath
+                $proceed = Enter-HephOrder -Cfg $Cfg -Order $order -JournalPath $journalPath -LogPath $LogPath
                 if ($proceed) {
                     $result = $null
                     try {
@@ -483,12 +861,11 @@ function Invoke-HephAgentCycle {
                     } catch {
                         $result = [pscustomobject]@{ ok = $false; detail = "exception: $($_.Exception.Message)" }
                     }
-                    $finalStatus = if ($result.ok) { "done" } else { "failed" }
                     $extra = $null
                     if ($result.PSObject.Properties.Name -contains "exe_candidates" -and $result.exe_candidates) {
                         $extra = @{ exe_candidates = @($result.exe_candidates) }
                     }
-                    Set-HephOrderStatus -Cfg $Cfg -OrderId $order.id -Status $finalStatus -Detail $result.detail -Extra $extra -LogPath $LogPath | Out-Null
+                    $finalStatus = Complete-HephOrder -Cfg $Cfg -Order $order -Result $result -Extra $extra -JournalPath $journalPath -LogPath $LogPath
                     Write-HephLog -LogPath $LogPath -Message "ordre $($order.id) [$($order.type)/$($order.server)]: ${finalStatus} -- $($result.detail)"
                 }
             } catch {
@@ -506,15 +883,15 @@ function Invoke-HephAgentCycle {
         }
 
         try {
-            $proceed = Set-HephOrderStatus -Cfg $Cfg -OrderId $order.id -Status "running" -LogPath $LogPath
+            $proceed = Enter-HephOrder -Cfg $Cfg -Order $order -JournalPath $journalPath -LogPath $LogPath
 
             if ($proceed) {
                 $result = $null
                 try {
                     switch ($order.type) {
-                        "update" { $result = Update-GameServer -Cfg $Cfg -ServerCfg $serverCfg }
+                        "update" { $result = Update-GameServer -Cfg $Cfg -ServerCfg $serverCfg @lockArgs }
                         "restart" {
-                            $note = Restart-GameServer -Cfg $Cfg -ServerCfg $serverCfg
+                            $note = Restart-GameServer -Cfg $Cfg -ServerCfg $serverCfg @lockArgs
                             $result = [pscustomobject]@{ ok = $true; detail = "redemarrage effectue${note}" }
                         }
                         "start" {
@@ -522,7 +899,7 @@ function Invoke-HephAgentCycle {
                             $result = [pscustomobject]@{ ok = $true; detail = "demarrage effectue" }
                         }
                         "stop" {
-                            Stop-GameServer -Cfg $Cfg -ServerCfg $serverCfg -Reason "Arret"
+                            Stop-GameServer -Cfg $Cfg -ServerCfg $serverCfg -Reason "Arret" @lockArgs
                             $result = [pscustomobject]@{ ok = $true; detail = "arret effectue" }
                         }
                         "install_mod" {
@@ -552,7 +929,7 @@ function Invoke-HephAgentCycle {
                             $result = [pscustomobject]@{ ok = $true; detail = "backup ${file} cree" }
                         }
                         "restore_save" {
-                            $detail = Restore-GameSave -Cfg $Cfg -ServerCfg $serverCfg -BackupFile $order.backup_file
+                            $detail = Restore-GameSave -Cfg $Cfg -ServerCfg $serverCfg -BackupFile $order.backup_file @lockArgs
                             $result = [pscustomobject]@{ ok = $true; detail = $detail }
                         }
                         "list_files" {
@@ -576,7 +953,6 @@ function Invoke-HephAgentCycle {
                     $result = [pscustomobject]@{ ok = $false; detail = "exception: $($_.Exception.Message)" }
                 }
 
-                $finalStatus = if ($result.ok) { "done" } else { "failed" }
                 $extra = $null
                 if ($order.type -eq "list_files" -and $result.PSObject.Properties.Name -contains "files") {
                     $extra = @{ files = @($result.files) }
@@ -587,7 +963,7 @@ function Invoke-HephAgentCycle {
                         @{ slug = $_.slug; version = $_.version; paths = @($_.paths) }
                     }) }
                 }
-                Set-HephOrderStatus -Cfg $Cfg -OrderId $order.id -Status $finalStatus -Detail $result.detail -Extra $extra -LogPath $LogPath | Out-Null
+                $finalStatus = Complete-HephOrder -Cfg $Cfg -Order $order -Result $result -Extra $extra -JournalPath $journalPath -LogPath $LogPath
                 Write-HephLog -LogPath $LogPath -Message "ordre $($order.id) [$($order.type)/$($serverCfg.name)]: ${finalStatus} -- $($result.detail)"
             }
         } catch {

@@ -95,3 +95,9 @@ L'agent **crée lui-même** la tâche planifiée de démarrage de chaque jeu (d�
 ## 7. Mise à jour de l'agent
 
 Recopiez `hephaestos-agent.ps1` et `hephaestos-lib.ps1` dans `C:\hephaestos\`. Le numéro `agent_version` remonté au backend confirme la version en place.
+
+## 8. Rétention des sauvegardes et journal des ordres
+
+- **Rétention par type** : `backup_keep` s'applique désormais à chaque type de sauvegarde séparément (daily, manual, pre-update, pre-restart, pre-restore, pre-bepinex, autre). Le nombre maximal de zips sur disque est donc `backup_keep` × nombre de types : à prévoir dans le dimensionnement de l'espace disque.
+- **Journal d'idempotence** : `orders-journal.json`, à côté du fichier de config (`C:\hephaestos\`), consigne l'état de chaque ordre (`started`, puis `done`/`failed`) pour ne jamais rejouer un ordre déjà traité ou interrompu. Les entrées de plus de 48 h sont purgées à chaque écriture.
+- Si le journal est **non inscriptible** (disque plein, droits), l'échec est écrit dans `hephaestos-agent.log` ; les ordres destructifs (`restore_save`, `update`, `restart`, `stop`) ne sont alors PAS exécutés et sont rapportés `failed` (« journal d'idempotence indisponible, ordre destructif non execute »), les autres ordres s'exécutent normalement.

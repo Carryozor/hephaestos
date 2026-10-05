@@ -282,7 +282,26 @@ function Update-HephServersFromBackend {
     }
     if ($current -eq $BackendConfig.hash) { return $Cfg }
 
-    $Cfg.servers = @($BackendConfig.servers)
+    # Refus des serveurs dont start_task/process contiennent jokers ou caracteres d'injection
+    # (Test-HephSafeName) : ils ne sont jamais ecrits dans la config locale.
+    $acceptedServers = @()
+    foreach ($candidate in @($BackendConfig.servers)) {
+        $badField = $null
+        foreach ($field in @("start_task", "process")) {
+            if ($candidate.PSObject.Properties.Name -contains $field -and $candidate.$field -and
+                -not (Test-HephSafeName -Value $candidate.$field)) {
+                $badField = $field
+            }
+        }
+        if ($badField) {
+            if ($LogPath) {
+                Write-HephLog -LogPath $LogPath -Message "config backend: serveur '$($candidate.name)' ignore, ${badField} invalide"
+            }
+            continue
+        }
+        $acceptedServers += $candidate
+    }
+    $Cfg.servers = @($acceptedServers)
     if ($Cfg.PSObject.Properties.Name -contains "backend_config_hash") {
         $Cfg.backend_config_hash = $BackendConfig.hash
     } else {
@@ -424,6 +443,13 @@ function Invoke-SetupServer {
         [Parameter(Mandatory)] $Cfg,
         [Parameter(Mandatory)] $Order
     )
+    # task_name et process partent dans la creation de tache planifiee / Get-Process.
+    foreach ($field in @("task_name", "process")) {
+        if ($Order.PSObject.Properties.Name -contains $field -and $Order.$field -and
+            -not (Test-HephSafeName -Value $Order.$field)) {
+            return [pscustomobject]@{ ok = $false; detail = "${field} invalide (caracteres non autorises): $($Order.$field)" }
+        }
+    }
     $installDir = Get-ServerInstallDir -SteamRoot $Cfg.steamcmd_root -AppId ([int]$Order.appid)
     $sep = [IO.Path]::DirectorySeparatorChar
     $rootFull = [IO.Path]::GetFullPath($installDir).TrimEnd($sep) + $sep
@@ -594,6 +620,10 @@ function Invoke-WriteFile {
     return [pscustomobject]@{ ok = $true; detail = "ecrit ($($bytes.Length) octets), backup .hephaestos-bak cree" }
 }
 
+# Timeout (secondes) des appels HTTP "legers" (api.steamcmd.net, push Kuma) : sans lui,
+# Invoke-RestMethod attend indefiniment sur une connexion pendante et fige tout le cycle.
+$script:HephHttpTimeoutSec = 20
+
 function Get-PublicBuildId {
     <#
     .SYNOPSIS
@@ -607,7 +637,7 @@ function Get-PublicBuildId {
     $url = "https://api.steamcmd.net/v1/info/${AppId}"
 
     try {
-        $resp = Invoke-RestMethod -Uri $url -Method Get
+        $resp = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec $script:HephHttpTimeoutSec
     } catch {
         throw "Echec appel api.steamcmd.net pour appid ${AppId}: $($_.Exception.Message)"
     }
@@ -651,7 +681,7 @@ function Send-KumaPush {
     $uri = "${PushUrl}?status=${Status}&msg=${encodedMsg}"
 
     try {
-        return Invoke-RestMethod -Uri $uri -Method Get
+        return Invoke-RestMethod -Uri $uri -Method Get -TimeoutSec $script:HephHttpTimeoutSec
     } catch {
         throw "Echec push Kuma vers ${PushUrl}: $($_.Exception.Message)"
     }
@@ -705,8 +735,74 @@ function Invoke-HephApi {
     try {
         return Invoke-RestMethod @params
     } catch {
-        throw "Echec appel API Hephaestos ${Method} ${Path}: $($_.Exception.Message)"
+        # L'exception d'origine est conservee en InnerException : elle porte la reponse HTTP
+        # (Response.StatusCode), que Get-HephHttpStatusCode relit pour distinguer un 409 d'une
+        # erreur transitoire. Un simple "throw <chaine>" la perdrait (seul le message survit).
+        throw (New-Object System.Exception("Echec appel API Hephaestos ${Method} ${Path}: $($_.Exception.Message)", $_.Exception))
     }
+}
+
+function Get-HephHttpStatusCode {
+    <#
+    .SYNOPSIS
+        Code HTTP (entier) d'une erreur d'appel web, ou $null s'il est indeterminable.
+    .NOTES
+        Lit Exception.Response.StatusCode en remontant la chaine d'InnerException (cas de
+        Invoke-HephApi qui enrobe l'exception d'origine), puis replie sur ErrorDetails quand il
+        porte un JSON avec status/status_code. JAMAIS de regex "409" sur le message : un uuid
+        d'ordre contenant "409" declencherait a tort.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        $ErrorRecord
+    )
+
+    $ex = $ErrorRecord.Exception
+    $depth = 0
+    while ($null -ne $ex -and $depth -lt 8) {
+        if ($ex.PSObject.Properties.Name -contains "Response" -and $null -ne $ex.Response) {
+            $resp = $ex.Response
+            if ($resp.PSObject.Properties.Name -contains "StatusCode" -and $null -ne $resp.StatusCode) {
+                try { return [int]$resp.StatusCode } catch { }
+            }
+        }
+        $ex = $ex.InnerException
+        $depth++
+    }
+
+    $details = $null
+    if ($null -ne $ErrorRecord.ErrorDetails) { $details = [string]$ErrorRecord.ErrorDetails.Message }
+    if ($details) {
+        try {
+            $obj = $details | ConvertFrom-Json -ErrorAction Stop
+            foreach ($name in @("status_code", "status")) {
+                if ($obj.PSObject.Properties.Name -contains $name) {
+                    $parsed = 0
+                    if ([int]::TryParse([string]$obj.$name, [ref]$parsed)) { return $parsed }
+                }
+            }
+        } catch { }
+    }
+    return $null
+}
+
+function Test-HephSafeName {
+    <#
+    .SYNOPSIS
+        Vrai si Value (nom de tache planifiee / de process venu de la config backend) ne
+        contient que des caracteres inoffensifs : lettres, chiffres, espace, _ . - \.
+    .NOTES
+        Refuse notamment * ? (jokers de Get-Process -Name : "*" ciblerait tous les process),
+        les quotes, ; & | < > ` $ et les retours a la ligne (injection dans schtasks/taskkill).
+        \z (et non $) : "$" accepterait un saut de ligne final.
+    #>
+    param(
+        [AllowNull()] [AllowEmptyString()]
+        $Value
+    )
+
+    if ($null -eq $Value) { return $false }
+    return ([string]$Value -match '^[\p{L}\p{N} _.\\-]+\z')
 }
 
 function New-RconPacket {
@@ -954,12 +1050,16 @@ function Get-PalworldPlayers {
 
     $players = @()
     foreach ($line in $lines[1..($lines.Count - 1)]) {
-        $fields = $line -split ","
+        # Format "name,playeruid,steamid" : le NOM peut contenir des virgules (ex. "Bob, le
+        # Brave"), pas les deux derniers champs. Parse depuis la FIN de ligne : steamid =
+        # dernier champ, playeruid = avant-dernier, nom = tout le reste rejoint. "\r" final
+        # retire (fins de ligne CRLF) pour ne pas polluer le steamid.
+        $fields = $line.TrimEnd("`r") -split ","
         if ($fields.Count -ge 3) {
             $players += [pscustomobject]@{
-                name      = $fields[0]
-                playeruid = $fields[1]
-                steamid   = $fields[2]
+                name      = ($fields[0..($fields.Count - 3)] -join ",")
+                playeruid = $fields[$fields.Count - 2].Trim()
+                steamid   = $fields[$fields.Count - 1].Trim()
             }
         }
     }
@@ -1277,8 +1377,30 @@ function Get-GameSaveDir {
     if (-not ($ServerCfg.PSObject.Properties.Name -contains "save_dir") -or -not $ServerCfg.save_dir) {
         return $null
     }
+    # save_dir vient de la config poussee par le backend : relatif strict (ni "..", ni
+    # lecteur, ni UNC, ni racine), puis controle de prefixe GetFullPath contre le dossier
+    # d'install (meme garde que Invoke-ReadFile). Restore-GameSave y fait un remplacement
+    # complet de dossier : un save_dir hors install serait destructeur.
+    $relative = [string]$ServerCfg.save_dir
+    if ($relative -match '^[\\/]' -or $relative -match '^[A-Za-z]:' -or (($relative -split '[\\/]') -contains "..")) {
+        throw "Get-GameSaveDir: save_dir invalide (chemin relatif sans '..', ni lecteur ni UNC attendu): ${relative}"
+    }
     $installDir = Get-ServerInstallDir -SteamRoot $Cfg.steamcmd_root -AppId $ServerCfg.appid
-    return Join-Path $installDir $ServerCfg.save_dir
+    $sep = [IO.Path]::DirectorySeparatorChar
+    # Separateurs normalises vers celui de la plateforme (no-op sous Windows).
+    $relative = $relative -replace '[\\/]', [string]$sep
+    $full = Join-Path $installDir $relative
+    $rootTrimmed = [IO.Path]::GetFullPath($installDir).TrimEnd('\', '/')
+    $rootFull = $rootTrimmed + $sep
+    $fullResolved = [IO.Path]::GetFullPath($full)
+    $resolvedTrimmed = $fullResolved.TrimEnd('\', '/')
+    # Strictement SOUS la racine : un save_dir qui se resout sur la racine elle-meme
+    # ("./", "x\..\", separateur final) ferait deplacer toute l'installation.
+    if (-not $fullResolved.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase) -or
+        $resolvedTrimmed -ieq $rootTrimmed) {
+        throw "Get-GameSaveDir: save_dir '${relative}' hors du dossier d'install"
+    }
+    return $full
 }
 
 function Get-SaveBackupDir {
@@ -1313,7 +1435,8 @@ function Backup-GameSave {
         Verifications qui peuvent echouer : dossier de saves existant ET zip reellement
         produit sur disque (jamais confiance au seul retour de Compress-Archive).
         Le tri de purge s'appuie sur le NOM (timestamp UTC prefixe, lexicographiquement
-        chronologique), pas sur les dates filesystem.
+        chronologique), pas sur les dates filesystem. backup_keep s'applique PAR TYPE
+        (suffixe <kind> du nom de fichier), pas globalement.
     #>
     param(
         [Parameter(Mandatory)]
@@ -1350,10 +1473,23 @@ function Backup-GameSave {
     if ($Cfg.PSObject.Properties.Name -contains "backup_keep" -and $Cfg.backup_keep) {
         $keep = [int]$Cfg.backup_keep
     }
-    Get-ChildItem -LiteralPath $backupDir -Filter "*.zip" |
-        Sort-Object -Property Name -Descending |
-        Select-Object -Skip $keep |
-        Remove-Item -Force
+    # Retention PAR TYPE (kind = suffixe du nom <ts>-<kind>.zip : daily, manual, pre-update,
+    # pre-restart, pre-restore, pre-bepinex...) : `keep` s'applique a chaque type
+    # separement, pour qu'une rafale de pre-* n'evince plus les sauvegardes quotidiennes.
+    # Les noms hors schema forment un type a part ("autre").
+    $byKind = @{}
+    foreach ($zipFile in @(Get-ChildItem -LiteralPath $backupDir -Filter "*.zip")) {
+        $kindKey = "autre"
+        if ($zipFile.Name -match '^\d{8}-\d{6}-(.+)\.zip$') { $kindKey = $Matches[1] }
+        if (-not $byKind.ContainsKey($kindKey)) { $byKind[$kindKey] = @() }
+        $byKind[$kindKey] += $zipFile
+    }
+    foreach ($kindKey in $byKind.Keys) {
+        $byKind[$kindKey] |
+            Sort-Object -Property Name -Descending |
+            Select-Object -Skip $keep |
+            Remove-Item -Force
+    }
 
     return $file
 }
@@ -1388,18 +1524,60 @@ function Get-GameSaveBackups {
         })
 }
 
+function Assert-HephZipSafe {
+    <#
+    .SYNOPSIS
+        Valide une archive AVANT toute ecriture : ouvrable (non tronquee), non vide, et sans
+        entree a chemin absolu / lecteur / contenant "..". Leve une exception sinon.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$ZipPath
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = $null
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+    } catch {
+        throw "Restore-GameSave: archive illisible ou tronquee (${ZipPath}): $($_.Exception.Message)"
+    }
+    try {
+        $count = 0
+        foreach ($entry in $zip.Entries) {
+            $count++
+            $entryName = [string]$entry.FullName
+            if ($entryName -match '^[\\/]' -or $entryName -match '^[A-Za-z]:' -or (($entryName -split '[\\/]') -contains "..")) {
+                throw "Restore-GameSave: entree d'archive a chemin dangereux refusee: ${entryName}"
+            }
+        }
+        if ($count -eq 0) {
+            throw "Restore-GameSave: archive vide: ${ZipPath}"
+        }
+    } finally {
+        $zip.Dispose()
+    }
+}
+
 function Restore-GameSave {
     <#
     .SYNOPSIS
-        Restaure un backup zip : stop serveur -> copie de surete de la save actuelle
-        (pre-restore) -> remplacement du dossier de saves -> start. Retourne un detail
-        lisible pour l'ordre.
+        Restaure un backup zip : validation du zip -> stop serveur -> copie de surete de la
+        save actuelle (pre-restore) -> extraction dans un dossier temporaire voisin ->
+        echange (ancienne save mise de cote, nouvelle en place, ancienne supprimee
+        seulement apres succes) -> start. Retourne un detail lisible pour l'ordre.
     .NOTES
         Le nom du backup vient d'un ordre reseau : valide STRICTEMENT (pas de separateur
         de chemin -- anti-traversal) et doit exister dans le dossier de backups du
-        serveur. La copie de surete est best-effort : son echec n'annule pas la
-        restauration (la save courante est precisement celle qu'on veut remplacer),
-        mais il est signale dans le detail.
+        serveur. Le contenu du zip est valide AVANT tout arret/ecriture (zip tronque ou
+        entree "..", chemin absolu => refus, save d'origine jamais touchee).
+
+        La copie de surete est OBLIGATOIRE quand la save existe : si elle echoue, la
+        restauration est ABANDONNEE (aucune suppression) -- l'ancien comportement
+        poursuivait et detruisait la seule copie. Tout echec apres l'arret du serveur
+        laisse la save d'origine en place (ou la restaure) et relance le serveur.
+
+        -LockPath (optionnel) : verrou de l'agent, rafraichi pendant le decompte d'arret.
     #>
     param(
         [Parameter(Mandatory)]
@@ -1409,7 +1587,9 @@ function Restore-GameSave {
         $ServerCfg,
 
         [Parameter(Mandatory)]
-        [string]$BackupFile
+        [string]$BackupFile,
+
+        [string]$LockPath = $null
     )
 
     if ($BackupFile -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.zip$') {
@@ -1426,25 +1606,86 @@ function Restore-GameSave {
         throw "Restore-GameSave: save_dir non configure pour '$($ServerCfg.name)'"
     }
 
-    Stop-GameServer -Cfg $Cfg -ServerCfg $ServerCfg -Reason "Restauration"
+    # Validation du zip AVANT d'arreter le serveur ou d'ecrire quoi que ce soit.
+    Assert-HephZipSafe -ZipPath $backupPath
 
+    $stopArgs = @{}
+    if ($LockPath) { $stopArgs.LockPath = $LockPath }
+    Stop-GameServer -Cfg $Cfg -ServerCfg $ServerCfg -Reason "Restauration" @stopArgs
+
+    $parentDir = Split-Path -Path $saveDir -Parent
+    $leafName = Split-Path -Path $saveDir -Leaf
+    $suffix = [guid]::NewGuid().ToString("N").Substring(0, 8)
+    $tmpDir = Join-Path $parentDir "${leafName}.restore-${suffix}"
+    $oldDir = Join-Path $parentDir "${leafName}.old-${suffix}"
     $safetyNote = ""
-    if (Test-Path -LiteralPath $saveDir) {
-        try {
-            $safety = Backup-GameSave -Cfg $Cfg -ServerCfg $ServerCfg -Kind "pre-restore"
-            $safetyNote = ", save precedente conservee dans ${safety}"
-        } catch {
-            $safetyNote = ", ATTENTION copie de surete impossible: $($_.Exception.Message)"
+    $oldMoved = $false
+
+    try {
+        if (Test-Path -LiteralPath $saveDir) {
+            try {
+                $safety = Backup-GameSave -Cfg $Cfg -ServerCfg $ServerCfg -Kind "pre-restore"
+                $safetyNote = ", save precedente conservee dans ${safety}"
+            } catch {
+                throw "Restore-GameSave: copie de surete impossible, restauration abandonnee (save intacte): $($_.Exception.Message)"
+            }
+        } elseif (-not (Test-Path -LiteralPath $parentDir)) {
+            New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
         }
-        Remove-Item -Path (Join-Path $saveDir "*") -Recurse -Force
-    } else {
-        New-Item -ItemType Directory -Path $saveDir -Force | Out-Null
+
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        try {
+            Expand-Archive -LiteralPath $backupPath -DestinationPath $tmpDir -Force
+        } catch {
+            throw "Restore-GameSave: echec d'extraction de ${BackupFile} (save intacte): $($_.Exception.Message)"
+        }
+        if (-not (Get-ChildItem -LiteralPath $tmpDir | Select-Object -First 1)) {
+            throw "Restore-GameSave: archive extraite vide pour ${BackupFile} (save intacte)"
+        }
+
+        # Echange : l'ancienne save est DEPLACEE (pas supprimee) ; en cas d'echec de la mise
+        # en place de la nouvelle, elle est remise a sa place.
+        if (Test-Path -LiteralPath $saveDir) {
+            Move-Item -LiteralPath $saveDir -Destination $oldDir -ErrorAction Stop
+            $oldMoved = $true
+        }
+        try {
+            Move-Item -LiteralPath $tmpDir -Destination $saveDir -ErrorAction Stop
+        } catch {
+            $moveError = $_.Exception.Message
+            if ($oldMoved) {
+                try {
+                    Move-Item -LiteralPath $oldDir -Destination $saveDir -ErrorAction Stop
+                    $oldMoved = $false
+                } catch {
+                    throw "Restore-GameSave: mise en place echouee (${moveError}) ET restauration de l'ancienne save impossible : elle se trouve dans ${oldDir}"
+                }
+            }
+            throw "Restore-GameSave: mise en place de la nouvelle save echouee, ancienne save restauree: ${moveError}"
+        }
+    } catch {
+        $failure = $_.Exception.Message
+        Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        # Save d'origine en place : on relance le serveur arrete par nos soins (best-effort).
+        # Jamais de relance sans save en place (un start creerait un monde vierge).
+        if (Test-Path -LiteralPath $saveDir) {
+            try {
+                Start-GameServer -ServerCfg $ServerCfg
+            } catch {
+                $startError = $_.Exception.Message
+                Write-Warning "Restore-GameSave: relance du serveur impossible apres echec de restauration: ${startError}"
+                $failure += "; ATTENTION le serveur n'a pas pu etre relance: ${startError}"
+            }
+        }
+        throw $failure
     }
 
-    Expand-Archive -LiteralPath $backupPath -DestinationPath $saveDir -Force
-
-    if (-not (Get-ChildItem -LiteralPath $saveDir | Select-Object -First 1)) {
-        throw "Restore-GameSave: dossier de saves vide apres extraction de ${BackupFile}"
+    if ($oldMoved) {
+        try {
+            Remove-Item -LiteralPath $oldDir -Recurse -Force -ErrorAction Stop
+        } catch {
+            $safetyNote += ", ATTENTION ancienne save non supprimee (${oldDir}): $($_.Exception.Message)"
+        }
     }
 
     Start-GameServer -ServerCfg $ServerCfg
@@ -1633,6 +1874,43 @@ function Invoke-Taskkill {
     return $LASTEXITCODE
 }
 
+function Start-HephSleepWithLock {
+    <#
+    .SYNOPSIS
+        Start-Sleep qui rafraichit le verrou de l'agent toutes les RefreshEverySeconds (60 s).
+    .NOTES
+        Le verrou (age max 10 min) n'est rafraichi par le cycle qu'AVANT chaque ordre : un
+        decompte d'arret long (stop_warn_seconds) ou une file d'ordres le laisserait
+        vieillir, et un second cycle volerait le verrou en plein arret. Sans LockPath :
+        Start-Sleep simple (comportement historique, un seul appel).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [int]$Seconds,
+
+        [string]$LockPath = $null,
+
+        [int]$RefreshEverySeconds = 60
+    )
+
+    if (-not $LockPath) {
+        Start-Sleep -Seconds $Seconds
+        return
+    }
+
+    $remaining = $Seconds
+    while ($remaining -gt 0) {
+        try {
+            Set-Content -LiteralPath $LockPath -Value (Get-Date).ToString("o") -Force
+        } catch {
+            Write-Warning "Start-HephSleepWithLock: rafraichissement du verrou impossible ($($_.Exception.Message))"
+        }
+        $chunk = [Math]::Min($RefreshEverySeconds, $remaining)
+        Start-Sleep -Seconds $chunk
+        $remaining -= $chunk
+    }
+}
+
 function Stop-GameServer {
     <#
     .SYNOPSIS
@@ -1655,8 +1933,19 @@ function Stop-GameServer {
         [Parameter(Mandatory)]
         $ServerCfg,
 
-        [string]$Reason = "Mise_a_jour"
+        [string]$Reason = "Mise_a_jour",
+
+        # Verrou de l'agent a rafraichir pendant le decompte d'avertissement (voir
+        # Start-HephSleepWithLock) ; optionnel, absent = Start-Sleep simple.
+        [string]$LockPath = $null
     )
+
+    # Defense en profondeur : "process" vient de la config backend et part dans
+    # Get-Process -Name (jokers) puis taskkill -- "*" viserait tous les process.
+    if ($ServerCfg.PSObject.Properties.Name -contains "process" -and $null -ne $ServerCfg.process -and
+        -not (Test-HephSafeName -Value $ServerCfg.process)) {
+        throw "Stop-GameServer: process invalide '$($ServerCfg.process)' pour '$($ServerCfg.name)'"
+    }
 
     switch ($ServerCfg.stop_adapter) {
         "palworld-rcon" {
@@ -1692,7 +1981,7 @@ function Stop-GameServer {
             try {
                 if ($playersCount -ne 0) {
                     Invoke-Rcon -RconHost $ServerCfg.rcon.host -Port $ServerCfg.rcon.port -Password $password -Command "Broadcast ${Reason}_dans_${warnSeconds}s" | Out-Null
-                    Start-Sleep -Seconds $warnSeconds
+                    Start-HephSleepWithLock -Seconds $warnSeconds -LockPath $LockPath
                 }
                 Invoke-Rcon -RconHost $ServerCfg.rcon.host -Port $ServerCfg.rcon.port -Password $password -Command "Save" | Out-Null
                 Start-Sleep -Seconds 10
@@ -1710,6 +1999,25 @@ function Stop-GameServer {
             $proc = Get-Process -Name $ServerCfg.process -ErrorAction SilentlyContinue
             if ($proc) {
                 Wait-Process -Id $proc.Id -Timeout 120 -ErrorAction SilentlyContinue
+            }
+
+            # Verification de l'EFFET : Wait-Process -ErrorAction SilentlyContinue avale le
+            # timeout, un process rebelle (Shutdown ignore) resterait vivant sans que rien ne
+            # le signale -- l'update lancerait alors steamcmd sur un serveur encore actif.
+            # Process encore la => taskkill /F puis courte attente ; toujours la => throw.
+            $stillAlive = @(Get-Process -Name $ServerCfg.process -ErrorAction SilentlyContinue | Where-Object { $_ })
+            if ($stillAlive.Count -gt 0) {
+                Write-Warning "Stop-GameServer: [$($ServerCfg.name)] process encore actif apres 120s, forcage taskkill /F"
+                foreach ($survivor in $stillAlive) {
+                    Invoke-Taskkill -ArgumentList @("/PID", "$($survivor.Id)", "/F")
+                }
+                foreach ($survivor in $stillAlive) {
+                    Wait-Process -Id $survivor.Id -Timeout 15 -ErrorAction SilentlyContinue
+                }
+                $afterKill = @(Get-Process -Name $ServerCfg.process -ErrorAction SilentlyContinue | Where-Object { $_ })
+                if ($afterKill.Count -gt 0) {
+                    throw "Stop-GameServer: [$($ServerCfg.name)] le process '$($ServerCfg.process)' est toujours en vie apres taskkill /F"
+                }
             }
         }
         "generic-graceful" {
@@ -1793,7 +2101,7 @@ function Stop-GameServer {
                 if ($playersCount -ne 0 -and $announce) {
                     $msg = $announce.Replace("{delay}", "$warnSeconds").Replace("{reason}", $Reason)
                     Invoke-Rcon -RconHost $rc.host -Port $rc.port -Password $rc.password -Command $msg | Out-Null
-                    Start-Sleep -Seconds $warnSeconds
+                    Start-HephSleepWithLock -Seconds $warnSeconds -LockPath $LockPath
                 }
                 Invoke-Rcon -RconHost $rc.host -Port $rc.port -Password $rc.password -Command $shutdownCmd | Out-Null
             } catch {
@@ -1855,6 +2163,14 @@ function Start-GameServer {
         $ServerCfg
     )
 
+    # start_task et process viennent de la config backend : refus de tout caractere
+    # d'injection/joker (voir Test-HephSafeName) AVANT d'appeler schtasks / Get-Process.
+    foreach ($field in @("start_task", "process")) {
+        if (-not (Test-HephSafeName -Value $ServerCfg.$field)) {
+            throw "Start-GameServer: ${field} invalide ('$($ServerCfg.$field)') pour '$($ServerCfg.name)'"
+        }
+    }
+
     Invoke-Schtasks -ArgumentList @("/Run", "/TN", $ServerCfg.start_task) | Out-Null
 
     $maxSeconds = 60
@@ -1907,12 +2223,17 @@ function Update-GameServer {
         $Cfg,
 
         [Parameter(Mandatory)]
-        $ServerCfg
+        $ServerCfg,
+
+        # Verrou de l'agent, transmis a Stop-GameServer (rafraichi pendant le decompte d'arret).
+        [string]$LockPath = $null
     )
 
     $manifestPath = Get-ManifestPath -SteamRoot $Cfg.steamcmd_root -AppId $ServerCfg.appid
 
-    Stop-GameServer -Cfg $Cfg -ServerCfg $ServerCfg
+    $stopArgs = @{}
+    if ($LockPath) { $stopArgs.LockPath = $LockPath }
+    Stop-GameServer -Cfg $Cfg -ServerCfg $ServerCfg @stopArgs
 
     # Backup de la save APRES l'arret (save flushee au shutdown) et AVANT steamcmd :
     # filet de securite contre une MAJ qui empoisonne la save (incident Palworld 15/07).
@@ -1991,10 +2312,15 @@ function Restart-GameServer {
         $Cfg,
 
         [Parameter(Mandatory)]
-        $ServerCfg
+        $ServerCfg,
+
+        # Verrou de l'agent, transmis a Stop-GameServer (rafraichi pendant le decompte d'arret).
+        [string]$LockPath = $null
     )
 
-    Stop-GameServer -Cfg $Cfg -ServerCfg $ServerCfg -Reason "Redemarrage"
+    $stopArgs = @{}
+    if ($LockPath) { $stopArgs.LockPath = $LockPath }
+    Stop-GameServer -Cfg $Cfg -ServerCfg $ServerCfg -Reason "Redemarrage" @stopArgs
 
     $backupNote = ""
     try {
@@ -2051,65 +2377,149 @@ function Test-BepInExUrlAllowed {
     }
 }
 
+# Timeout (secondes) par requete de telechargement : 100 Mo max, plafond large (liaison
+# lente) mais fini -- sans lui une connexion pendante bloque le cycle indefiniment.
+$script:BepInExDownloadTimeoutSec = 300
+# Nombre maximum de redirections suivies A LA MAIN (chaque cible est revalidee).
+$script:BepInExMaxRedirects = 5
+
+function Resolve-BepInExRedirect {
+    <#
+    .SYNOPSIS
+        Si Response est une redirection 3xx, retourne l'URL absolue cible (Location resolue
+        contre CurrentUrl) ; $null si ce n'est pas une redirection. Leve une exception si la
+        redirection est inexploitable (pas de Location, URL invalide) : fail-closed.
+    .NOTES
+        Compatible Windows PowerShell 5.1 (WebException.Response : HttpWebResponse, en-tetes
+        WebHeaderCollection, acces par indexeur) ET PowerShell 7 (HttpResponseMessage,
+        Headers.Location de type Uri). Response peut aussi etre un objet de reponse
+        retourne (non leve) portant StatusCode/Headers.
+    #>
+    param(
+        $Response,
+
+        [Parameter(Mandatory)]
+        [string]$CurrentUrl
+    )
+
+    if ($null -eq $Response) { return $null }
+    if (-not ($Response.PSObject.Properties.Name -contains "StatusCode") -or $null -eq $Response.StatusCode) { return $null }
+    $code = 0
+    try { $code = [int]$Response.StatusCode } catch { return $null }
+    if (@(301, 302, 303, 307, 308) -notcontains $code) { return $null }
+
+    $location = $null
+    if ($Response.PSObject.Properties.Name -contains "Headers" -and $null -ne $Response.Headers) {
+        $headers = $Response.Headers
+        if ($headers.PSObject.Properties.Name -contains "Location" -and $null -ne $headers.Location) {
+            $location = $headers.Location
+        } else {
+            try { $location = $headers["Location"] } catch { $location = $null }
+        }
+    }
+    if ($location -is [array]) { $location = $location[0] }
+    $locationText = ""
+    if ($location -is [Uri]) { $locationText = $location.OriginalString } elseif ($null -ne $location) { $locationText = [string]$location }
+    if ([string]::IsNullOrWhiteSpace($locationText)) {
+        throw "Invoke-BepInExDownload: redirection ${code} sans en-tete Location depuis ${CurrentUrl} : URL finale indeterminee, telechargement refuse"
+    }
+
+    $next = $null
+    $isValid = [Uri]::TryCreate([Uri]$CurrentUrl, $locationText, [ref]$next)
+    if (-not $isValid -or $null -eq $next -or -not $next.IsAbsoluteUri) {
+        throw "Invoke-BepInExDownload: en-tete Location inexploitable depuis ${CurrentUrl} : '${locationText}'"
+    }
+    return $next.AbsoluteUri
+}
+
 function Invoke-BepInExDownload {
     <#
     .SYNOPSIS
-        Telecharge un mod BepInEx vers DestPath. Valide l'URL AVANT toute
-        requete reseau, rejette (et supprime) un fichier au-dela de
-        BepInExMaxDownloadBytes. Wrapper isole autour d'Invoke-WebRequest pour
-        rester mockable en test sans reseau reel.
+        Telecharge un mod BepInEx vers DestPath. Les redirections sont suivies A LA MAIN
+        (max BepInExMaxRedirects) et CHAQUE URL (initiale et cibles) est validee contre
+        l'allowlist + https AVANT d'etre requetee ; rejette (et supprime) un fichier au-dela
+        de BepInExMaxDownloadBytes. Wrapper isole autour d'Invoke-WebRequest pour rester
+        mockable en test sans reseau reel.
     .NOTES
-        Verification qui peut echouer : la presence reelle du fichier sur disque
-        est controlee explicitement, jamais seulement le code de retour de la
-        commande de telechargement.
+        Verification qui peut echouer : la presence reelle du fichier sur disque est
+        controlee explicitement, jamais seulement le code de retour de la commande.
 
-        Revue securite du 12/09/2026 (H1) : Invoke-WebRequest suit les
-        redirections (-MaximumRedirection 5) SANS jamais revalider l'hote de
-        chaque saut -- un hote autorise qui redirigerait (open-redirect, DNS
-        hijack, CDN compromis) vers un hote hors allowlist telechargerait et
-        laisserait executer (chargement DLL par le jeu) du contenu non
-        controle. Fix : l'URL RÉELLEMENT atteinte (apres redirections) est
-        relue sur la reponse (`BaseResponse.ResponseUri` sous Windows
-        PowerShell 5.1, `BaseResponse.RequestMessage.RequestUri` sous
-        PowerShell 7+ -- les deux proprietes sont verifiees, l'agent de prod
-        tourne en 5.1 mais les tests Pester tournent sous pwsh 7 en conteneur
-        Linux) et revalidee avant de faire confiance au fichier ; le fichier
-        est supprime si l'URL finale est hors allowlist.
+        Revue securite du 12/09/2026 (H1) puis durcissement v2.4.0 : l'ancienne version
+        laissait Invoke-WebRequest suivre 5 redirections puis relisait l'URL finale APRES
+        coup -- le contenu d'un hote hors allowlist etait deja telecharge (et fail-open si
+        l'URL finale etait illisible). Desormais -MaximumRedirection 0 : aucune requete
+        n'est jamais emise vers un hote non valide, et toute redirection sans cible
+        exploitable est un ECHEC (fail-closed). L'URL finale est par construction la
+        derniere URL requetee (deja validee) ; si la reponse annonce en plus une URI
+        (BaseResponse.ResponseUri en 5.1, RequestMessage.RequestUri en 7), elle est
+        revalidee et le fichier supprime si elle est hors allowlist.
     #>
     param(
         [Parameter(Mandatory)] [string]$Url,
         [Parameter(Mandatory)] [string]$DestPath
     )
-    Test-BepInExUrlAllowed -Url $Url
+
     try {
-        $response = Invoke-WebRequest -Uri $Url -OutFile $DestPath -MaximumRedirection 5 -UseBasicParsing -PassThru
-    } catch {
-        throw "Invoke-BepInExDownload: echec telechargement ${Url}: $($_.Exception.Message)"
-    }
-    $finalUri = $null
-    if ($response -and $response.BaseResponse) {
-        if ($response.BaseResponse.PSObject.Properties.Name -contains "ResponseUri" -and $response.BaseResponse.ResponseUri) {
-            $finalUri = $response.BaseResponse.ResponseUri
-        } elseif ($response.BaseResponse.PSObject.Properties.Name -contains "RequestMessage" -and
-                  $response.BaseResponse.RequestMessage -and $response.BaseResponse.RequestMessage.RequestUri) {
-            $finalUri = $response.BaseResponse.RequestMessage.RequestUri
-        }
-    }
-    if ($finalUri) {
-        try {
-            Test-BepInExUrlAllowed -Url $finalUri.AbsoluteUri
-        } catch {
+        $currentUrl = $Url
+        $redirects = 0
+        $response = $null
+        while ($true) {
+            Test-BepInExUrlAllowed -Url $currentUrl
+            $response = $null
+            $nextUrl = $null
+            try {
+                $response = Invoke-WebRequest -Uri $currentUrl -OutFile $DestPath -MaximumRedirection 0 -UseBasicParsing -PassThru -TimeoutSec $script:BepInExDownloadTimeoutSec -ErrorAction Stop
+            } catch {
+                $failure = $_
+                $errorResponse = $null
+                if ($failure.Exception.PSObject.Properties.Name -contains "Response") { $errorResponse = $failure.Exception.Response }
+                $nextUrl = Resolve-BepInExRedirect -Response $errorResponse -CurrentUrl $currentUrl
+                if (-not $nextUrl) {
+                    throw "Invoke-BepInExDownload: echec telechargement ${currentUrl}: $($failure.Exception.Message)"
+                }
+            }
+            if (-not $nextUrl) {
+                $nextUrl = Resolve-BepInExRedirect -Response $response -CurrentUrl $currentUrl
+            }
+            if (-not $nextUrl) { break }
+
+            # Corps eventuel de la reponse 3xx ecrit par -OutFile : jamais conserve.
             Remove-Item -LiteralPath $DestPath -Force -ErrorAction SilentlyContinue
-            throw "Invoke-BepInExDownload: redirection vers un hote non autorise (${finalUri}): $($_.Exception.Message)"
+            $redirects++
+            if ($redirects -gt $script:BepInExMaxRedirects) {
+                throw "Invoke-BepInExDownload: trop de redirections (max $($script:BepInExMaxRedirects)) depuis ${Url}"
+            }
+            $currentUrl = $nextUrl
         }
-    }
-    if (-not (Test-Path -LiteralPath $DestPath)) {
-        throw "Invoke-BepInExDownload: fichier non produit apres telechargement: ${DestPath}"
-    }
-    $size = (Get-Item -LiteralPath $DestPath).Length
-    if ($size -gt $script:BepInExMaxDownloadBytes) {
-        Remove-Item -LiteralPath $DestPath -Force
-        throw "Invoke-BepInExDownload: fichier trop volumineux (${size} octets, max ${script:BepInExMaxDownloadBytes})"
+
+        $finalUri = $null
+        if ($response -and $response.PSObject.Properties.Name -contains "BaseResponse" -and $response.BaseResponse) {
+            $baseResponse = $response.BaseResponse
+            if ($baseResponse.PSObject.Properties.Name -contains "ResponseUri" -and $baseResponse.ResponseUri) {
+                $finalUri = $baseResponse.ResponseUri
+            } elseif ($baseResponse.PSObject.Properties.Name -contains "RequestMessage" -and
+                      $baseResponse.RequestMessage -and $baseResponse.RequestMessage.RequestUri) {
+                $finalUri = $baseResponse.RequestMessage.RequestUri
+            }
+        }
+        if ($finalUri) {
+            try {
+                Test-BepInExUrlAllowed -Url $finalUri.AbsoluteUri
+            } catch {
+                throw "Invoke-BepInExDownload: redirection vers un hote non autorise (${finalUri}): $($_.Exception.Message)"
+            }
+        }
+        if (-not (Test-Path -LiteralPath $DestPath)) {
+            throw "Invoke-BepInExDownload: fichier non produit apres telechargement: ${DestPath}"
+        }
+        $size = (Get-Item -LiteralPath $DestPath).Length
+        if ($size -gt $script:BepInExMaxDownloadBytes) {
+            throw "Invoke-BepInExDownload: fichier trop volumineux (${size} octets, max ${script:BepInExMaxDownloadBytes})"
+        }
+    } catch {
+        # Tout echec : aucun fichier partiel/non fiable ne reste sur disque.
+        Remove-Item -LiteralPath $DestPath -Force -ErrorAction SilentlyContinue
+        throw
     }
 }
 

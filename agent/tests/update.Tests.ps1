@@ -43,8 +43,11 @@ OptionSettings=(AdminPassword="pwd123")
 
         Mock Invoke-Rcon { return "" }
         Mock Start-Sleep {}
-        Mock Get-Process { [pscustomobject]@{ Id = 4242 } }
-        Mock Wait-Process {}
+        # Le process "meurt" a la fin de l'attente Wait-Process (v2.4.0 : un process encore vivant
+        # apres l'attente declenche taskkill /F puis une exception -- cas teste a part).
+        $script:procGone = $false
+        Mock Get-Process { if ($script:procGone) { $null } else { [pscustomobject]@{ Id = 4242 } } }
+        Mock Wait-Process { $script:procGone = $true }
         # Depuis le 17/07 l'annonce n'est emise que si des joueurs sont presents
         # (ou comptage inconnu) : ces tests historiques valident le chemin "annonce".
         Mock Get-PalworldPlayers { [pscustomobject]@{ Count = 3; Players = @() } }
