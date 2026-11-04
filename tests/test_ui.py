@@ -80,3 +80,15 @@ def test_inline_handlers_are_json_escaped_and_fetch_servers_is_guarded():
     result = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "INLINE HANDLERS OK" in result.stdout
+
+
+def test_every_game_asset_referenced_in_app_js_exists():
+    # Un jeu dedie (ex. Enshrouded) sans son icone/logo casserait l'affichage de la carte.
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).parent.parent / "app"
+    js = (root / "static" / "app.js").read_text()
+    refs = re.findall(r'"(/static/assets/[\w.-]+)"', js)
+    assert "/static/assets/enshrouded-icon.png" in refs
+    missing = [r for r in refs if not (root / r.lstrip("/")).exists()]
+    assert missing == []

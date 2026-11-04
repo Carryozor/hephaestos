@@ -76,6 +76,7 @@ const GAME_ASSETS = {
   palworld: { icon: "/static/assets/palworld-icon.png", logo: "/static/assets/palworld-logo.png" },
   windrose: { icon: "/static/assets/windrose-icon.png", symbol: "/static/assets/windrose-symbol.png" },
   valheim: { icon: "/static/assets/valheim-icon.png", logo: "/static/assets/valheim-logo.png" },
+  enshrouded: { icon: "/static/assets/enshrouded-icon.png", logo: "/static/assets/enshrouded-logo.png" },
 };
 
 function showError(msg) {
