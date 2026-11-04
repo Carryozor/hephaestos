@@ -564,13 +564,26 @@ async function submitDeployWizard() {
 
 // --- deploiement : finalisation (POST /api/deploy/servers/{name}/setup) ---
 
+// Pre-remplissage du formulaire de finalisation par appid de serveur dedie. Purement
+// indicatif : tout reste modifiable, un jeu absent d'ici garde le formulaire vierge.
+const FINALIZE_PRESETS = {
+  2278520: {  // Enshrouded : nom/mot de passe/ports vivent dans enshrouded_server.json, pas en CLI
+    exe: "enshrouded_server.exe", args: "", queryPort: 15637, saveDir: "savegame",
+    hint: "Enshrouded : nom, mot de passe et slots se règlent dans enshrouded_server.json (éditeur de fichiers) ; ports UDP 15636-15637.",
+  },
+};
+
 function finalizeFormHtml(name, reg) {
+  const preset = FINALIZE_PRESETS[reg.server_appid] || {};
   const candidates = reg.exe_candidates || [];
-  const options = candidates.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  const options = candidates.map(c =>
+    `<option value="${esc(c)}"${c === preset.exe ? " selected" : ""}>${esc(c)}</option>`).join("");
+  const val = (v) => (v === undefined || v === null ? "" : ` value="${esc(String(v))}"`);
   return `
     <h3>Finaliser ${esc(reg.display_name || name)}</h3>
+    ${preset.hint ? `<p class="hint">${esc(preset.hint)}</p>` : ""}
     <label>Exécutable serveur <select id="fin-exe">${options}</select></label>
-    <label>Arguments <input type="text" id="fin-args" maxlength="500"></label>
+    <label>Arguments <input type="text" id="fin-args" maxlength="500"${val(preset.args)}></label>
     <label>Adaptateur d'arrêt
       <select id="fin-adapter" onchange="document.getElementById('fin-rcon').style.display = this.value === 'rcon-generic' ? '' : 'none'">
         <option value="generic-graceful" selected>generic-graceful (arrêt propre)</option>
@@ -585,8 +598,8 @@ function finalizeFormHtml(name, reg) {
       <label>Commande d'annonce ({delay}/{reason} substitués)
         <input type="text" id="fin-rcon-announce" maxlength="200"></label>
     </div>
-    <label>Query port A2S (optionnel) <input type="number" id="fin-query-port" min="1" max="65535"></label>
-    <label>Dossier de saves (optionnel, relatif à l'install) <input type="text" id="fin-save-dir" maxlength="260"></label>
+    <label>Query port A2S (optionnel) <input type="number" id="fin-query-port" min="1" max="65535"${val(preset.queryPort)}></label>
+    <label>Dossier de saves (optionnel, relatif à l'install) <input type="text" id="fin-save-dir" maxlength="260"${val(preset.saveDir)}></label>
     <label>Délai d'annonce avant arrêt (s) <input type="number" id="fin-warn" min="0" max="600"></label>
     <label><input type="checkbox" id="fin-start-now" checked> démarrer immédiatement</label>
     <div class="modal-error" id="fin-error"></div>

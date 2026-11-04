@@ -25,5 +25,12 @@
       "name": "Hephaestos-Valheim",
       "world": "Dedicated"
     }
+  },
+  "2278520": {
+    "name": "enshrouded",
+    "process": "enshrouded_server",
+    "stop_adapter": "generic-graceful",
+    "exe_relative_path": "enshrouded_server.exe",
+    "launch_args": ""
   }
 }

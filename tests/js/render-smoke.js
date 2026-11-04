@@ -394,6 +394,15 @@ const finalizeHtml = sandbox.finalizeFormHtml("vrising",
   { exe_candidates: ["VRisingServer.exe", "<script>x</script>.exe"] });
 if (finalizeHtml.includes("<script>x</script>")) throw new Error("candidat exe non echappe");
 if (!finalizeHtml.includes("generic-graceful")) throw new Error("adaptateur par defaut absent");
+// Preset Enshrouded (appid 2278520) : exe pre-selectionne, query port 15637, saves "savegame",
+// aucun argument (nom/mot de passe/ports vivent dans enshrouded_server.json). Jeu inconnu : rien de pre-rempli.
+const ensHtml = sandbox.finalizeFormHtml("enshrouded", { server_appid: 2278520,
+  exe_candidates: ["enshrouded_server.exe", "enshrouded_server_old.exe"] });
+if (!ensHtml.includes('value="enshrouded_server.exe" selected')) throw new Error("preset Enshrouded: exe non pre-selectionne");
+if (!ensHtml.includes('id="fin-query-port" min="1" max="65535" value="15637"')) throw new Error("preset Enshrouded: query port absent");
+if (!ensHtml.includes('id="fin-save-dir" maxlength="260" value="savegame"')) throw new Error("preset Enshrouded: save_dir absent");
+if (!ensHtml.includes("enshrouded_server.json")) throw new Error("preset Enshrouded: indice de config absent");
+if (finalizeHtml.includes("15637") || finalizeHtml.includes("savegame")) throw new Error("preset applique a un jeu sans preset");
 
 // --- etat de MAJ par mod : 1 etat explicite et 1 seul par combinaison de champs ---
 const modStateCases = [
